@@ -55,6 +55,10 @@ const replyLanguagePrefs = new Map();
 /** @type {Map<string, number>} senderId -> alert cooldown expiresAt */
 const deliveryAlertCooldowns = new Map();
 
+/** After delivery step-2 reply, bare YES / agent phrases trigger handoff */
+const deliveryAgentOfferPending = new Map();
+const DELIVERY_AGENT_OFFER_TTL_MS = 48 * 60 * 60 * 1000;
+
 const CHAT_HISTORY_MAX_MESSAGES = Number(
   process.env.CHAT_HISTORY_MAX_MESSAGES || 20
 );
@@ -180,11 +184,26 @@ HOW TO ORDER:
 - Visit our shop
 - Message us here on Messenger for pickup orders
 
-DELIVERY:
-- Delivery is arranged via Maxim (third-party rider app).
-- The delivery fee is shouldered by the customer (not included in the coffee price unless you state otherwise).
-- When a customer asks about delivery, wants delivery, or orders for delivery: briefly confirm Maxim delivery and that the customer pays the delivery fee, then ask for (1) complete delivery address, (2) contact name, and (3) mobile/contact number. Keep it friendly and in one short reply.
-- Do NOT use [[HANDOFF]] for delivery questions — keep helping in chat and collect details here.
+DELIVERY (Maxim — two steps; do NOT use [[HANDOFF]] until step 2 agent offer is accepted):
+
+STEP 1 — Customer asks about delivery / Maxim / wants padala:
+- Briefly confirm delivery via Maxim and that the customer pays the Maxim delivery fee (separate from coffee).
+- Ask for all three in one friendly message: (1) complete delivery address, (2) contact name, (3) mobile/contact number.
+- Keep step 1 short (2–4 sentences). Do NOT use [[HANDOFF]] yet.
+
+STEP 2 — Customer sends delivery details (address + name + phone, or enough to fill the three fields from context):
+- Reply in this order (use their first name in the thanks line when you have it; otherwise "Thanks for the details!"):
+  1) "Thanks for the details, {Name}!" (or "Thanks for the details!" if name unclear)
+  2) Confirm what you captured — bullet or lines for Name, Address, Contact number (repeat exactly what they sent; if something is missing, politely note what is still needed before arranging delivery)
+  3) "I'll arrange your delivery with Maxim for you once your order is confirmed. The Maxim delivery fee is paid by you through the rider (separate from your coffee order)."
+  4) Politely: payment for the coffee order must be settled first before we dispatch for delivery — ask them to send proof of payment in this chat after paying (offer GCash/UnionBank from PAYMENT FAQ if they have not paid yet).
+  5) Offer a human: "If you'd like to connect with our customer representative to finalize your order, reply YES — or tell me you'd like to chat with an agent, a team member, or a real live person."
+- Step 2 may be longer (up to ~8 short sentences). Still plain text, no buttons.
+
+STEP 3 — After step 2, if they reply YES (or oo / yes po), or clearly want an agent / representative / real person / live person / staff to help:
+- Respond with exactly [[HANDOFF]] and nothing else (server connects them to the team).
+
+- Do NOT use [[HANDOFF]] for step 1 or step 2 alone — only when they accept the representative offer in step 3.
 - Never say "call me", "call us", "message us on Messenger", or suggest buttons/CTAs. Plain text only in this thread.
 - Do not invent delivery fees, zones, or timelines.
 
@@ -231,7 +250,7 @@ Q: How can I order? / Pickup?
 A: Visit the shop Monday–Friday 9 AM–6 PM, or message here on Messenger for pickup. For delivery, we use Maxim (customer pays delivery fee). We are closed weekends.
 
 Q: Do you deliver? / Maxim?
-A: Yes, via Maxim. Delivery fee is paid by the customer. Ask them for complete address, contact name, and mobile number in chat.
+A: Yes, via Maxim. Delivery fee is paid by the customer. Follow DELIVERY step 1, then step 2 when they send details, then step 3 if they want a representative.
 
 Q: How much is [product]? / Price list? / Tagpila? / How much for Beantol Prime?
 A: If they name one bean: give all retail sizes at once (e.g. Prime espresso — 250g ₱420, 500g ₱780, 1kg ₱1,450). If roast type unclear for a name that exists in both lists (e.g. Guji), ask espresso vs filter once, then give all sizes for that roast. If they ask generally with no bean: ask which bean and roast type. Never ask "which size?" when the bean is already clear. For Prime, Santos, or Cerrado, add the wholesale 6kg+ line when giving prices.
@@ -280,8 +299,8 @@ RULES:
 - Tone: friendly, warm, professional.
 - LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used unless the server says they requested Bisaya/Cebuano or Tagalog replies. Examples: "Naa mo?" / "Open pa?" → English. "Puede ka mag bisaya?" / "Bisaya lang" → Cebuano/Bisaya (NOT handoff).
 - LANGUAGE CHANGE IS NOT HANDOFF: Switching language is not handoff. Examples: "puede ka mag bisaya" → Bisaya; "English balik bi" / "balik english" / "English please" → English again. Never use [[HANDOFF]] for language switches.
-- HUMAN HANDOFF: Only if they want a real person, agent, or staff — not the bot. Then respond with exactly [[HANDOFF]] and nothing else. The server sends the handoff message and pauses the bot.
-- If you do not know something (custom orders, stock today), say you are not sure and ask them to leave details in chat or ask for a team member. Do not suggest calling or Messenger buttons. Use [[HANDOFF]] only when they explicitly want a real person/agent — not for delivery.
+- HUMAN HANDOFF: When they want a real person, agent, staff, or customer representative — or reply YES (or oo / yes po) after you offered a representative following delivery details — respond with exactly [[HANDOFF]] and nothing else. The server sends the handoff message and pauses the bot.
+- If you do not know something (custom orders, stock today), say you are not sure and ask them to leave details in chat or ask for a team member. Do not suggest calling or Messenger buttons. Use [[HANDOFF]] for delivery only in DELIVERY step 3, not for initial delivery questions.
 - Do not invent products, prices, or policies not listed above.`;
 
 const openai = OPENAI_API_KEY
@@ -293,7 +312,10 @@ const HANDOFF_MARKER = "[[HANDOFF]]";
 const HANDOFF_PATTERNS = [
   /\bhuman\b/i,
   /\breal person\b/i,
+  /\breal live person\b/i,
   /\blive person\b/i,
+  /\bi want to chat with an agent\b/i,
+  /\bwant to chat with (?:a )?(?:agent|representative)\b/i,
   /\blocal person\b/i,
   /\btalk to (?:a )?(?:person|human|agent|staff|someone|representative)\b/i,
   /\bchat with (?:a )?(?:person|human|agent|staff|someone|representative)\b/i,
@@ -343,10 +365,97 @@ function aiReplyIsDeliveryFlow(reply) {
   );
 }
 
-function wantsHumanHandoff(text) {
+function aiReplyIsDeliveryDetailsConfirmation(reply) {
+  const r = (reply || "").trim();
+  if (!r) return false;
+  return (
+    /\bthanks for (?:the )?details\b/i.test(r) &&
+    /\b(?:payment|pay).*(?:before|first|prior|settled|settle)/i.test(r) &&
+    /\bmaxim\b/i.test(r) &&
+    /\b(?:reply\s+)?yes\b|\bcustomer representative\b|\breal live person\b/i.test(
+      r
+    )
+  );
+}
+
+function markDeliveryAgentOfferPending(senderId) {
+  deliveryAgentOfferPending.set(senderId, Date.now());
+}
+
+function clearDeliveryAgentOfferPending(senderId) {
+  deliveryAgentOfferPending.delete(senderId);
+}
+
+function isDeliveryAgentOfferPending(senderId) {
+  const at = deliveryAgentOfferPending.get(senderId);
+  if (!at) return false;
+  if (Date.now() - at > DELIVERY_AGENT_OFFER_TTL_MS) {
+    deliveryAgentOfferPending.delete(senderId);
+    return false;
+  }
+  return true;
+}
+
+function wantsAgentAfterDeliveryOffer(text) {
+  const t = text.trim();
+  if (!t) return false;
+  if (
+    /^(yes|oo|yes po|oo po|yes please|oo please|yes,?\s*please|oo,?\s*please)$/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (
+    /^(yes|oo)\b/i.test(t) &&
+    t.length <= 40 &&
+    /\b(?:agent|representative|person|staff|tao|team)\b/i.test(t)
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:want|like|need|gusto).*(?:agent|representative|staff|person|tao)\b/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:chat|talk|speak|connect).*(?:agent|representative|staff|person|tao)\b/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (/\b(?:real|live)\s+(?:person|human)\b/i.test(t)) return true;
+  if (/\bcustomer representative\b/i.test(t)) return true;
+  return false;
+}
+
+function looksLikeDeliveryDetailsSubmission(text) {
+  const t = text.trim();
+  if (t.length < 25) return false;
+  const hasPhone =
+    /\b(?:09\d{9}|\+?63[\s-]?9\d{9})\b/.test(t) ||
+    /\b\d{3}[-.\s]?\d{3,4}[-.\s]?\d{4}\b/.test(t);
+  const hasAddressHint =
+    /\b(?:street|st\.|ave|avenue|road|rd\.|barangay|brgy|city|cebu|village|subdivision|unit|floor|blk|block|purok|banilad|mandaue|lapu|consolacion)\b/i.test(
+      t
+    ) || t.length > 80;
+  return hasPhone && hasAddressHint;
+}
+
+function wantsHumanHandoff(text, senderId) {
   const normalized = text.trim();
   if (!normalized) return false;
   if (isReplyLanguagePreferenceRequest(normalized)) return false;
+  if (
+    senderId &&
+    isDeliveryAgentOfferPending(senderId) &&
+    wantsAgentAfterDeliveryOffer(normalized)
+  ) {
+    return true;
+  }
   if (isDeliveryInquiry(normalized) && !/\b(?:person|human|agent|staff|tao|representative)\b/i.test(normalized)) {
     return false;
   }
@@ -410,6 +519,7 @@ function getActiveHandoff(senderId) {
 }
 
 function startHandoff(senderId, userText) {
+  clearDeliveryAgentOfferPending(senderId);
   const now = Date.now();
   handoffSessions.set(senderId, {
     handedOffAt: now,
@@ -419,6 +529,7 @@ function startHandoff(senderId, userText) {
 }
 
 function resolveHandoff(senderId) {
+  clearDeliveryAgentOfferPending(senderId);
   return handoffSessions.delete(senderId);
 }
 
@@ -959,7 +1070,7 @@ async function handleMessage(senderId, userText) {
 
   updateReplyLanguagePreference(senderId, userText);
 
-  if (wantsHumanHandoff(userText)) {
+  if (wantsHumanHandoff(userText, senderId)) {
     await triggerHandoff(senderId, userText, "phrase match");
     return;
   }
@@ -980,7 +1091,7 @@ async function handleMessage(senderId, userText) {
           ...history,
           { role: "user", content: userText },
         ],
-        max_tokens: 400,
+        max_tokens: 500,
       });
       reply =
         completion.choices[0]?.message?.content?.trim() ||
@@ -992,24 +1103,35 @@ async function handleMessage(senderId, userText) {
     }
   }
 
-  if (
-    isAiHandoffReply(reply) &&
-    !isReplyLanguagePreferenceRequest(userText) &&
-    !isDeliveryInquiry(userText) &&
-    !aiReplyIsDeliveryFlow(reply)
-  ) {
-    await triggerHandoff(senderId, userText, "AI [[HANDOFF]] marker");
-    return;
+  if (isAiHandoffReply(reply) && !isReplyLanguagePreferenceRequest(userText)) {
+    const blockHandoff =
+      isDeliveryInquiry(userText) &&
+      !wantsAgentAfterDeliveryOffer(userText) &&
+      !isDeliveryAgentOfferPending(senderId);
+    if (!blockHandoff) {
+      clearDeliveryAgentOfferPending(senderId);
+      await triggerHandoff(senderId, userText, "AI [[HANDOFF]] marker");
+      return;
+    }
+  }
+
+  if (aiReplyIsDeliveryDetailsConfirmation(reply)) {
+    markDeliveryAgentOfferPending(senderId);
+    console.log(`Delivery step-2 sent for ${senderId} — YES / agent reply will handoff.`);
   }
 
   const deliveryTrigger = isDeliveryInquiry(userText)
     ? "customer message"
-    : aiReplyIsDeliveryFlow(reply)
-      ? "bot delivery reply"
-      : null;
+    : looksLikeDeliveryDetailsSubmission(userText)
+      ? "delivery details submitted"
+      : aiReplyIsDeliveryFlow(reply)
+        ? "bot delivery reply"
+        : aiReplyIsDeliveryDetailsConfirmation(reply)
+          ? "delivery details confirmed"
+          : null;
 
   if (deliveryTrigger) {
-    console.log(`Delivery inquiry detected for ${senderId} (${deliveryTrigger}).`);
+    console.log(`Delivery alert for ${senderId} (${deliveryTrigger}).`);
     await notifyDeliveryByEmail(senderId, userText, deliveryTrigger);
   }
 
