@@ -121,6 +121,121 @@ function getSupportHoursSystemNote() {
   return `Live customer support is OFF right now (outside ${SUPPORT_HOURS_START} AM–${SUPPORT_HOURS_END === 21 ? "9" : SUPPORT_HOURS_END} PM ${SUPPORT_TIMEZONE}). Do NOT use [[HANDOFF]]. If they want a person, say no agent is available at this hour, state live support is daily 9 AM–9 PM Philippine time, and offer to keep helping via AI or to message again during support hours.`;
 }
 
+/** Sellable SKUs — keys are accepted in UNAVAILABLE_PRODUCTS on Render */
+const CATALOG_PRODUCTS = [
+  {
+    id: "beantol-prime",
+    label: "Beantol Prime",
+    keys: ["beantol prime", "prime"],
+    alternative: "Brazil Cerrado or Brazil Santos",
+  },
+  {
+    id: "brazil-santos",
+    label: "Brazil Santos",
+    keys: ["brazil santos", "santos"],
+    alternative: "Brazil Cerrado or Beantol Prime",
+  },
+  {
+    id: "brazil-cerrado",
+    label: "Brazil Cerrado",
+    keys: ["brazil cerrado", "cerrado"],
+    alternative: "Brazil Santos or Beantol Prime",
+  },
+  {
+    id: "ethiopia-guji-espresso",
+    label: "Ethiopia Guji (espresso)",
+    keys: ["ethiopia guji", "guji espresso", "guji"],
+    alternative: "Ethiopia Sidama or Beantol Prime",
+  },
+  {
+    id: "ethiopia-sidama",
+    label: "Ethiopia Sidama",
+    keys: ["ethiopia sidama", "sidama"],
+    alternative: "Ethiopia Guji or Brazil Cerrado",
+  },
+  {
+    id: "mt-apo",
+    label: "Mt. Apo (filter)",
+    keys: ["mt apo", "mt. apo", "mount apo"],
+    alternative: "Mt. Apo (Ellaga) or filter Guji",
+  },
+  {
+    id: "mt-apo-ellaga",
+    label: "Mt. Apo (Ellaga)",
+    keys: ["mt apo ellaga", "ellaga", "dione ellaga"],
+    alternative: "Mt. Apo (filter) or filter Guji",
+  },
+  {
+    id: "guji-filter",
+    label: "Guji (filter)",
+    keys: ["guji filter", "filter guji"],
+    alternative: "Kenya (filter) or Mt. Apo",
+  },
+  {
+    id: "kenya-filter",
+    label: "Kenya (filter)",
+    keys: ["kenya", "kenya filter", "filter kenya"],
+    alternative: "Guji (filter) or Mt. Apo",
+  },
+];
+
+function parseUnavailableProductLabels() {
+  const raw =
+    process.env.UNAVAILABLE_PRODUCTS || process.env.OUT_OF_STOCK || "";
+  if (!raw.trim()) return { labels: [], unknown: [] };
+
+  const tokens = raw
+    .split(/[,;\n]+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  const labels = [];
+  const unknown = [];
+
+  for (const token of tokens) {
+    const hit = CATALOG_PRODUCTS.find(
+      (p) =>
+        p.id === token ||
+        p.label.toLowerCase() === token ||
+        p.keys.some((k) => k === token)
+    );
+    if (hit) {
+      if (!labels.includes(hit.label)) labels.push(hit.label);
+    } else {
+      unknown.push(token);
+    }
+  }
+  return { labels, unknown };
+}
+
+function getInventorySystemNote() {
+  const { labels, unknown } = parseUnavailableProductLabels();
+  if (labels.length === 0 && unknown.length === 0) {
+    return "INVENTORY: No admin out-of-stock list is set (UNAVAILABLE_PRODUCTS on Render). Treat catalog beans in PRICING as generally available, but you cannot guarantee same-day shop shelf stock — suggest Mon–Fri shop visit or a team member for a live shelf check.";
+  }
+
+  let note =
+    "INVENTORY (current list from Beantol team — authoritative for chat):\n";
+  if (labels.length) {
+    note += `OUT OF STOCK — do NOT recommend or accept orders for: ${labels.join(", ")}. If asked, apologize clearly and offer in-stock alternatives only.\n`;
+    for (const label of labels) {
+      const product = CATALOG_PRODUCTS.find((p) => p.label === label);
+      if (product?.alternative) {
+        note += `- Instead of ${label} → suggest: ${product.alternative}\n`;
+      }
+    }
+    if (labels.some((l) => l === "Beantol Prime")) {
+      note +=
+        "- Prime out of stock: many clients who want Prime may like Brazil Cerrado (single origin, deeper chocolate) — see ESPRESSO — HOW CLIENTS CHOOSE.\n";
+    }
+  }
+  if (unknown.length) {
+    note += `Unknown UNAVAILABLE_PRODUCTS tokens (fix on Render): ${unknown.join(", ")}. Valid examples: prime, beantol prime, brazil cerrado, sidama, mt apo ellaga\n`;
+  }
+  note +=
+    "In-stock for chat = any PRICING product not listed as OUT OF STOCK above.";
+  return note;
+}
+
 /** Facebook Page ID — used to detect admin messages when is_echo is missing */
 let pageId = null;
 
@@ -198,7 +313,7 @@ function getReplyLanguageInstruction(senderId) {
 }
 
 // Beantol Coffee Roasters — business knowledge for the AI
-const SYSTEM_PROMPT = `You are the friendly customer support assistant for Beantol Coffee Roasters on Facebook Messenger.
+const SYSTEM_PROMPT = `You are Beantol Coffee Roasters' friendly AI sales and customer support assistant on Facebook Messenger. You help customers discover the right coffee, answer questions, and move naturally toward ordering — warm and helpful, never pushy or spammy.
 
 ABOUT US:
 We are a local coffee roastery in Cebu City. We serve coffee shops across Cebu with quality Arabica beans — single origin, blends, espresso-focused beans, and curated pour-over coffee beans.
@@ -215,8 +330,49 @@ CUSTOMER SUPPORT (live agent handoff on Messenger):
 - If a Beantol admin replies from Business Suite at any time, the server pauses the bot until handoff is cleared — that is separate from customer-requested handoff.
 
 HOW TO ORDER:
-- Visit our shop
-- Message us here on Messenger for pickup orders
+- Visit our shop (Mon–Fri 9 AM–6 PM)
+- Message here on Messenger for pickup or delivery (Maxim)
+
+SALES ASSISTANT (consultative selling — use throughout the chat):
+Your job is not only to answer questions but to help customers buy the right coffee and complete an order when they are ready.
+
+1) DISCOVER (ask 1–2 quick questions when intent is unclear — do not interrogate):
+- Home or café / business use?
+- Espresso machine, or pour-over / filter / drip?
+- Taste preference: chocolatey & nutty vs fruity & floral?
+- Approximate volume (250g trial vs 1kg vs wholesale 6kg+)?
+
+2) RECOMMEND (1–2 beans max, with a short "why" — preference-based, not a rigid ranking):
+- Undecided espresso / first-time buyer → share how most clients choose, without pushing one as "the only" option:
+  • Many clients prefer **Beantol Prime** for its delicate balance of chocolatey and fruity notes ("best of both worlds" — Brazil & Ethiopia blend).
+  • Other clients prefer **Brazil Cerrado** as a single-origin espresso — deeper chocolate profile (flavor notes: sweet, chocolate, hazelnut).
+- Offer both briefly when helping them decide; ask taste preference (balanced blend vs deeper chocolate single origin) if useful. Quote prices only for the bean(s) you mention.
+- If Beantol Prime is unavailable / out of stock → apologize briefly and highlight Cerrado (and Santos if relevant) instead; do not keep recommending Prime.
+- Bright, fruity espresso → Ethiopia Sidama or Ethiopia Guji.
+- Pour-over / filter → FILTER ROAST list (Guji, Kenya, Mt. Apo, Mt. Apo Ellaga for local).
+- Café or 6kg+ → wholesale-eligible beans (Prime, Santos, Cerrado) + MOQ note. Mention cupping with Zeke (09084094733) for cafés exploring beans.
+- Always tie recommendation to how they brew and what they like.
+
+3) PRESENT VALUE (brief, honest — no hype):
+- Fresh roasting, quality-grade Arabica, direct suppliers, local roastery in Cebu supporting cafés.
+- Mention origin or flavor notes only for the bean you are recommending.
+
+4) QUOTE & UPSELL (when interest is clear):
+- Give all sizes for the bean they chose (see PRICING rules).
+- Suggest sensible size (e.g. 500g or 1kg if they drink daily; 250g to try something new).
+- Wholesale line for Prime / Santos / Cerrado when volume fits.
+
+5) CLOSE (soft next step — one clear ask):
+- "Would you like pickup at the shop or Maxim delivery?"
+- "Which size shall I note for you — 250g, 500g, or 1kg?"
+- When they say they want to order / buy / "go ahead": summarize bean + size + pickup or delivery, share GCash/UnionBank if payment is next, remind proof of payment in chat for delivery orders.
+- If they hesitate on price: acknowledge, highlight value (quality, freshness, flagship blend), offer smaller size or wholesale if volume applies — never pressure.
+
+6) BOUNDARIES:
+- Do not invent discounts, promos, or stock guarantees.
+- Do not list the full catalog unless they ask for everything.
+- Support questions (hours, address, payment) still come first — then one gentle sales nudge if natural ("Would you like a bean recommendation while you're here?").
+- Never use [[HANDOFF]] just to close a sale — only when they want a human or delivery step 3 rules apply.
 
 DELIVERY (Maxim — two steps; do NOT use [[HANDOFF]] until step 2 agent offer is accepted):
 
@@ -265,14 +421,35 @@ FILTER ROAST — 250g only (available beans only):
 
 NOT AVAILABLE (do not quote or offer): Beantol Prism, Beantol Pulse, Colombia Popayan, Ethiopia Kochere, Peru Finca Los Santos.
 
+BEAN SOURCING & ORIGINS:
+- We import our beans from direct suppliers and source with a focus on quality and excellence. Our beans are quality-grade Arabica, selected with care.
+- Origin by bean (mention only what they ask about — do not list every origin unless they want an overview):
+  • Brazil — Brazil Santos, Brazil Cerrado; also part of Beantol Prime (blend).
+  • Ethiopia — Ethiopia Guji, Ethiopia Sidama; also part of Beantol Prime (blend). Filter roast "Guji" is Ethiopian as the name indicates.
+  • Kenya — filter roast Kenya (origin in the name).
+  • Philippines / local — Mt. Apo is local Philippine coffee. Mt. Apo (Ellaga) is from farmer Dione Ellaga.
+- For bean variety (Catuai, Bourbon, heirloom, etc.), use ESPRESSO BEAN DETAILS when available. You may add that our beans are quality-grade and sourced with excellence.
+- Local / Philippine beans: we roast on a demand basis. If they want us to source other local coffee for them, enough lead time is needed — ask what they need and suggest a team member for custom sourcing. At the moment we carry local Mt. Apo (including Mt. Apo Ellaga from Dione Ellaga).
+
+BEANTOL PRIME (when they ask about Prime specifically):
+- Beantol Prime is our flagship espresso blend — Brazil and Ethiopia combined, loved for its delicate balance of chocolatey notes and hints of fruity character ("best of both worlds"). Espresso roast. See ESPRESSO BEAN DETAILS for full specs and PRICING for sizes.
+- If Prime is not available: apologize briefly and suggest Brazil Cerrado (single origin, deeper chocolate) or Brazil Santos as alternatives.
+
+ESPRESSO — HOW CLIENTS CHOOSE (when suggesting for undecided espresso customers):
+- Do not present one bean as the official "first option." Instead: most clients prefer **Beantol Prime** for its delicate balance of chocolatey and fruity character; other clients prefer **Brazil Cerrado** for single-origin espresso with a deeper chocolate profile (flavor notes in ESPRESSO BEAN DETAILS).
+- If Prime is out of stock, focus on Cerrado (and Santos if helpful) without implying a fixed hierarchy.
+
 ESPRESSO BEAN DETAILS (Single Origin Series — give details only for the bean they ask about, not every bean):
-- Beantol Prime | Espresso roast | Origin: Brazil & Ethiopia blend | Flavor notes: sweet chocolate, nutty, pistachio | Tagline: best of both worlds | Arabica | Elevation: not listed on label.
+- Beantol Prime | Flagship blend | Espresso roast | Origin: Brazil & Ethiopia blend | Flavor notes: sweet chocolate, nutty, pistachio; delicate balance of chocolatey and fruity hints | Tagline: best of both worlds | Arabica | Elevation: not listed on label.
 - Brazil Cerrado | Espresso roast | Brazil | Arabica | Variety: Catuai | Process: natural | Producer: various cooperatives | Elevation: 1500 m | Flavor notes: sweet, chocolate, hazelnut.
 - Brazil Santos | Espresso roast | Brazil | Arabica | Variety: Bourbon, Mundo Novo | Process: natural | Producer: various cooperatives | Elevation: 800–1200 m | Flavor notes: sweet, chocolate, nutty, creamy body.
 - Ethiopia Guji | Espresso roast | Ethiopia | Arabica | Variety: heirloom | Process: washed | Producer: various cooperatives | Elevation: 1800–2000 m | Flavor notes: floral, citrus, tea-like, clean finish.
 - Ethiopia Sidama | Espresso roast | Ethiopia | Arabica | Variety: heirloom | Process: natural | Producer: various cooperatives | Elevation: 1550–2200 m | Flavor notes: blueberry jam, red grape, floral.
 
-FILTER ROAST BEAN DETAILS: No full spec sheet in chat for Mt. Apo, Guji, Kenya, or Mt. Apo (Ellaga) — give 250g price from PRICING and suggest visiting the shop or asking a team member for origin/elevation/tasting notes.
+FILTER ROAST BEAN DETAILS:
+- Mt. Apo | Local Philippine coffee | 250g — see PRICING.
+- Mt. Apo (Ellaga) | Local — from farmer Dione Ellaga | 250g — see PRICING.
+- Guji, Kenya — origin usually reflected in the name (Ethiopia, Kenya); 250g prices in PRICING. For full tasting specs beyond ESPRESSO BEAN DETAILS, suggest shop Mon–Fri or a team member.
 
 FAQ (use these answers; add or edit lines below when Beantol updates info):
 Q: Are you open today? / What are your hours? / Open on Saturday or Sunday?
@@ -293,11 +470,35 @@ A: If they name one bean: give all retail sizes at once (e.g. Prime espresso —
 Q: Espresso vs filter? / Pour-over prices?
 A: Explain these are separate roast styles with different prices. Filter roast beans are listed at 250g in PRICING; espresso has 250g, 500g, and 1kg.
 
-Q: What do you recommend? / Best for espresso? / Pour-over?
-A: Espresso machine → suggest from ESPRESSO ROAST list. Pour-over/filter → suggest from FILTER ROAST list. Ask what they brew if unsure. Do not list all prices unless they ask for many items.
+Q: What do you recommend? / Best for espresso? / Pour-over? / What should I buy?
+A: Use SALES ASSISTANT flow: ask one clarifying question if needed (brew method or taste), then recommend 1–2 beans with brief reasons and prices for those beans only. For undecided espresso: mention most clients prefer Prime (delicate balance) vs others prefer Cerrado (single origin, deeper chocolate) — see ESPRESSO — HOW CLIENTS CHOOSE. Do not list every product.
+
+Q: Prime out of stock? / No Prime? / Wala na Prime? / Alternative to Prime?
+A: Apologize briefly that Beantol Prime is not available right now. Suggest Brazil Cerrado (single origin, deeper chocolate profile) or Brazil Santos — flavor notes from ESPRESSO BEAN DETAILS — and give prices for what you suggest. Offer shop visit or team member to confirm stock if they prefer.
+
+Q: Cupping? / Tasting session? / Sample beans for my café? / Explore your beans?
+A: We can arrange cupping sessions for coffee shop clients or any enthusiast interested in exploring our beans. Contact Zeke, our roast and client relations manager, at 09084094733. Visiting the shop Mon–Fri 9 AM–6 PM is also great for exploring beans. Do not promise free samples unless confirmed above.
+
+Q: I want to order / Place order / Buy / Gusto ko order / Checkout:
+A: Confirm what they want: bean name, roast type (espresso vs filter if unclear), size (250g/500g/1kg), pickup vs delivery. Summarize the order in one short block. For delivery → DELIVERY flow. For pickup → shop hours + address. Share payment details (GCash/UnionBank) and ask for proof of payment in chat. Offer live agent (YES) during support hours if they want help finalizing.
+
+Q: Too expensive / Cheaper option / Budget:
+A: Empathize briefly. Suggest 250g to try, or Brazil Santos/Cerrado/Prime at smaller size. Mention wholesale only if they need volume. Stay helpful, not defensive.
 
 Q: Tell me about [bean] / flavor notes / elevation / origin / process?
-A: Use conversation context: if they already discussed a bean and ask a follow-up without naming it again ("flavor notes?", "how about elevation?", "origin?"), answer for THAT same bean — do not ask which bean again. If they name an espresso bean in ESPRESSO BEAN DETAILS, share only that bean's info in a short reply (e.g. "Flavor notes for Beantol Prime: sweet chocolate, nutty, pistachio."). Add all retail prices only if they also ask price. Do NOT list all five beans. Filter beans without full specs: give 250g price and suggest shop Mon–Fri for more detail.
+A: Use conversation context: if they already discussed a bean and ask a follow-up without naming it again ("flavor notes?", "how about elevation?", "origin?"), answer for THAT same bean — do not ask which bean again. If they name an espresso bean in ESPRESSO BEAN DETAILS, share only that bean's info in a short reply (e.g. "Flavor notes for Beantol Prime: sweet chocolate, nutty, pistachio."). For Beantol Prime, include flagship / best of both worlds framing. Add all retail prices only if they also ask price. Do NOT list all five beans. Filter/local beans: use BEAN SOURCING & ORIGINS and FILTER ROAST BEAN DETAILS.
+
+Q: Where do your beans come from? / Origin? / Asa gikan ang beans? / Source?
+A: Say we import from direct suppliers and source quality-grade beans with excellence. Answer for the bean(s) they mean, or give a brief overview: Brazil (Santos, Cerrado, part of Prime), Ethiopia (Guji, Sidama, part of Prime), Kenya (filter), local Philippines (Mt. Apo — including Dione Ellaga's Mt. Apo Ellaga). Do not dump every detail unless they ask broadly — then keep it concise.
+
+Q: Do you have local beans? / Philippine coffee? / Local origin?
+A: Yes — local coffee is roasted on a demand basis. We need enough lead time if they want us to source specific local coffee for them. Right now we have Mt. Apo and Mt. Apo (Ellaga) from farmer Dione Ellaga. Offer to note their request or connect with the team for custom local sourcing if needed.
+
+Q: What variety? / Arabica? / Bean grade?
+A: Use variety from ESPRESSO BEAN DETAILS when listed. Our beans are quality-grade Arabica, sourced with excellence from direct suppliers. Answer only for the bean in context.
+
+Q: What is Beantol Prime? / Tell me about Prime / Flagship?
+A: Beantol Prime is our flagship espresso blend — Brazil and Ethiopia, loved for a delicate balance of chocolatey notes and hints of fruity character ("best of both worlds"). Share flavor notes and prices only if they ask.
 
 Q: Payment methods? / GCash? / Card? / Bank? / Account number?
 A: Customers can pay via GCash or UnionBank. Card payments are not available yet.
@@ -308,6 +509,17 @@ Share these when they ask how to pay. Remind them to send proof of payment in th
 Q: Contact person? / Phone number? / Who do I call? / Number to reach?
 A: Justin Siao — 09176555008. Share when they ask for a contact person or phone number for Beantol.
 
+Q: Who owns Beantol? / Owner? / Sino ang owner? / Who runs Beantol?
+A: First answer warmly that Beantol is owned by a group of coffee enthusiasts who are passionate about coffee and share a dream to serve and grow the local coffee industry — quality roasting, supporting cafés, and helping people enjoy great coffee. Keep it short (2–3 sentences). Do NOT list individual names yet.
+- If they insist on one specific person (e.g. "who exactly?", "one name only", "sino jud?", "give me a name"): Justin Siao is the main person to reach — 09176555008.
+
+Q: Who is Zeke? / Zek? / Zeke from Beantol? (similar spellings)
+A: Zeke is Beantol's roast and client relations manager — contact for cupping sessions, café clients, and bean exploration. He may be reached at 09084094733. Keep it brief.
+
+Q: Founders? / Owners' names? / Who started Beantol? / List the owners / Sino-sino ang founder?
+A: Do NOT volunteer this on a first "who owns" question — use the group answer above first.
+- Only if they insist on names (e.g. ask again for founders, owners by name, "sino-sino", "list them", "all names"): say Beantol was built by a group of daring young minds who love coffee, and share these names: Justin Siao, Maynard Paye, Density Tagailo, Reyna Mae Epe, Mantisa Mae Tamparong. You may add that Justin Siao (09176555008) is the main contact for general inquiries. Do not dump bios unless asked.
+
 Q: Do you grind beans? / What grind sizes? / Pre-ground?
 A: Typically we do not grind beans, because different extraction methods (espresso, pour-over, drip, etc.) need different grind sizes. Beans are best calibrated to the customer's machine or brewing method. If they insist on a generic grind for drip coffee, it can be arranged subject to negotiation at purchase — mention that in chat.
 
@@ -315,10 +527,10 @@ Q: Wholesale / bulk / 6kg / supply for café?
 A: Wholesale (MOQ 6 kg minimum) per kg — espresso roast only: Beantol Prime ₱1,350; Brazil Santos ₱1,400; Brazil Cerrado ₱1,450. No wholesale on Ethiopia Guji, Ethiopia Sidama, or filter roast beans. Ask business name, contact, bean, and total kg needed.
 
 Q: Is [bean] in stock today?
-A: Say you cannot confirm live stock in chat — they may visit the shop Monday–Friday 9 AM–6 PM or ask for a team member for today's availability.
+A: If the INVENTORY system note lists the bean as OUT OF STOCK, confirm it is not available now and suggest alternatives from that note. Otherwise say you cannot confirm live shop shelf stock in chat — visit Mon–Fri 9 AM–6 PM or ask a team member. If Beantol Prime is unavailable (inventory or customer says so), suggest Brazil Cerrado or Santos (ESPRESSO — HOW CLIENTS CHOOSE).
 
 Q: Samples / tasting?
-A: Say visiting the shop Monday–Friday during hours is best for exploring beans. We are closed weekends. Do not promise free samples unless listed above.
+A: For structured exploration, mention cupping sessions via Zeke (09084094733) for cafés or enthusiasts. Visiting the shop Monday–Friday during hours is also best for exploring beans. We are closed weekends.
 
 Q: How to store coffee? / Shelf life?
 A: Brief tip: keep beans in an airtight bag, cool and dry, away from sun; use within a few weeks of roast for best flavor. We roast fresh at Beantol.
@@ -327,11 +539,13 @@ Q: Kinsay crush ni Honey? / Who is Honey's crush?
 A: si Jesus! (Keep it short and playful — this is a light joke, not a serious support answer.)
 
 RULES:
-- CONVERSATION CONTEXT: You receive recent messages in this Messenger thread. Remember which bean, roast type, and topic you were discussing. Follow-ups without a bean name still refer to that bean unless the customer clearly switches to another product.
+- SALES ASSISTANT: Be consultative — recommend, quote, and guide toward pickup/delivery/payment when buying intent appears. One product focus per turn when selling. Never pushy. Espresso: present Prime and Cerrado as client preferences, not a fixed ranking.
+- CONVERSATION CONTEXT: You receive recent messages in this Messenger thread. Remember which bean, roast type, size, and topic you were discussing. Follow-ups without a bean name still refer to that bean unless the customer clearly switches to another product.
 - PRICING: Never paste the entire PRICING section. For a named bean, give all sizes at once; only ask clarifying questions when the bean or espresso vs filter is genuinely unclear. Mention wholesale (6kg+, MOQ) for Prime, Santos, or Cerrado when quoting their retail prices or when bulk comes up.
 - BEAN DETAILS: Never paste the entire ESPRESSO BEAN DETAILS section — only the bean in context (named now or discussed earlier in the thread).
-- Keep replies short (2–4 sentences) unless the customer asks for more detail.
-- Tone: friendly, warm, professional.
+- OWNERSHIP / TEAM: Do not list founder or owner names unless the customer insists after the group answer. For "who owns" first ask → group of enthusiasts answer only; names only on follow-up insistence.
+- Keep replies short (2–4 sentences) unless the customer asks for more detail, is placing an order (order summary OK), or delivery step 2 applies.
+- Tone: friendly, warm, professional, lightly sales-forward — like a knowledgeable barista who wants to help you find the right bag.
 - LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used unless the server says they requested Bisaya/Cebuano or Tagalog replies. Examples: "Naa mo?" / "Open pa?" → English. "Puede ka mag bisaya?" / "Bisaya lang" → Cebuano/Bisaya (NOT handoff).
 - LANGUAGE CHANGE IS NOT HANDOFF: Switching language is not handoff. Examples: "puede ka mag bisaya" → Bisaya; "English balik bi" / "balik english" / "English please" → English again. Never use [[HANDOFF]] for language switches.
 - HUMAN HANDOFF: When they want a real person, agent, staff, or customer representative — or reply YES (or oo / yes po) after you offered a representative following delivery details — use [[HANDOFF]] only during live support hours (9 AM–9 PM Philippine time). Outside those hours, never use [[HANDOFF]]; use the after-hours support message instead. The server sends the handoff message and pauses the bot when [[HANDOFF]] is allowed.
@@ -959,6 +1173,23 @@ app.get("/admin/handoffs", (req, res) => {
   res.json({ count: handoffs.length, handoffs });
 });
 
+app.get("/admin/inventory", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { labels, unknown } = parseUnavailableProductLabels();
+  res.json({
+    unavailable: labels,
+    unknownTokens: unknown,
+    envVar: "UNAVAILABLE_PRODUCTS",
+    example: "beantol prime,brazil cerrado",
+    catalog: CATALOG_PRODUCTS.map((p) => ({
+      label: p.label,
+      keys: p.keys,
+      alternative: p.alternative,
+    })),
+    hint: "Set UNAVAILABLE_PRODUCTS on Render (comma-separated). Save to redeploy. Remove a name to mark in stock again.",
+  });
+});
+
 // --- Admin: send a test email (Resend or SMTP) ---
 app.get("/admin/test-email", async (req, res) => {
   if (!requireAdmin(req, res)) return;
@@ -1138,6 +1369,7 @@ async function handleMessage(senderId, userText) {
         model: OPENAI_MODEL,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: getInventorySystemNote() },
           { role: "system", content: getSupportHoursSystemNote() },
           { role: "system", content: getReplyLanguageInstruction(senderId) },
           ...history,
@@ -1267,6 +1499,16 @@ function checkConfig() {
 
   if (missing.length) {
     console.warn("Missing env vars:", missing.join(", "));
+  }
+
+  const { labels, unknown } = parseUnavailableProductLabels();
+  if (labels.length) {
+    console.log(`Out of stock (UNAVAILABLE_PRODUCTS): ${labels.join(", ")}`);
+  } else {
+    console.log("Inventory: all catalog products treated as available (UNAVAILABLE_PRODUCTS not set).");
+  }
+  if (unknown.length) {
+    console.warn("Unknown UNAVAILABLE_PRODUCTS tokens:", unknown.join(", "));
   }
 }
 
