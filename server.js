@@ -44,6 +44,7 @@ const ADMIN_RESUME_COMMANDS = (process.env.ADMIN_RESUME_COMMANDS || "#bot")
   .filter(Boolean);
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
 const DEBUG_WEBHOOK = process.env.DEBUG_WEBHOOK === "true";
+const PAGE_ID_ENV = process.env.PAGE_ID;
 
 /** @type {Map<string, { handedOffAt: number, expiresAt: number, lastMessage: string }>} */
 const handoffSessions = new Map();
@@ -411,6 +412,15 @@ function isAdminResumeCommand(text) {
     const target = normalizeCommandText(cmd);
     return normalized === target || normalized.includes(target);
   });
+}
+
+function rememberPageIdFromEvent(event) {
+  if (event.message?.is_echo !== true || !event.sender?.id) return;
+  const senderPageId = String(event.sender.id);
+  if (pageId !== senderPageId) {
+    pageId = senderPageId;
+    console.log(`Page ID learned from message echo: ${pageId}`);
+  }
 }
 
 function isOutboundFromPage(event) {
@@ -878,6 +888,8 @@ async function processWebhookEvents(body) {
   for (const { event, channel } of collectMessagingEvents(body)) {
     if (!event.message) continue;
 
+    rememberPageIdFromEvent(event);
+
     const text = event.message.text || "";
     if (DEBUG_WEBHOOK || /#bot/i.test(text)) {
       console.log(
@@ -1066,6 +1078,11 @@ async function verifyEmailOnStartup() {
 }
 
 async function loadPageId() {
+  if (PAGE_ID_ENV) {
+    pageId = String(PAGE_ID_ENV);
+    console.log(`Page ID from PAGE_ID env: ${pageId}`);
+    return;
+  }
   if (!PAGE_ACCESS_TOKEN) return;
   try {
     const response = await fetch(
@@ -1074,12 +1091,17 @@ async function loadPageId() {
     const data = await response.json();
     if (data.id) {
       pageId = String(data.id);
-      console.log(`Page ID loaded for outbound detection: ${pageId}`);
-    } else {
-      console.warn("Could not load Page ID:", JSON.stringify(data));
+      console.log(`Page ID loaded from API: ${pageId}`);
+      return;
+    }
+    console.log(
+      "Page ID API lookup not available (permission not required). Optional: set PAGE_ID on Render. Echo webhooks still detect admin messages when Meta sends them."
+    );
+    if (DEBUG_WEBHOOK) {
+      console.log("loadPageId response:", JSON.stringify(data));
     }
   } catch (err) {
-    console.warn("loadPageId failed:", err.message);
+    console.log("Page ID API lookup skipped:", err.message);
   }
 }
 
