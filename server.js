@@ -767,19 +767,33 @@ function getActiveHandoff(senderId) {
   return session;
 }
 
-function startHandoff(senderId, userText) {
+function startHandoff(senderId, userText, platform = "messenger") {
   clearDeliveryAgentOfferPending(senderId);
+  const existing = handoffSessions.get(senderId);
   const now = Date.now();
   handoffSessions.set(senderId, {
     handedOffAt: now,
     expiresAt: now + HANDOFF_TIMEOUT_HOURS * 60 * 60 * 1000,
     lastMessage: userText.trim(),
+    platform: existing?.platform || platform,
   });
 }
 
 function resolveHandoff(senderId) {
   clearDeliveryAgentOfferPending(senderId);
   return handoffSessions.delete(senderId);
+}
+
+function isSupportedWebhookObject(object) {
+  return object === "page" || object === "instagram";
+}
+
+function webhookPlatform(body) {
+  return body?.object === "instagram" ? "instagram" : "messenger";
+}
+
+function platformLabel(platform) {
+  return platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
 }
 
 function rememberBotMessageId(mid) {
@@ -934,19 +948,24 @@ async function sendAlertEmail({ subject, text }) {
   return { provider: "smtp", id: info.messageId };
 }
 
-async function triggerHandoff(senderId, userText, source) {
-  startHandoff(senderId, userText);
+async function triggerHandoff(senderId, userText, source, platform = "messenger") {
+  startHandoff(senderId, userText, platform);
   console.log(
-    `Human handoff started for ${senderId} (${source}). Auto-replies paused for ${HANDOFF_TIMEOUT_HOURS}h or until admin resolves.`
+    `Human handoff started for ${senderId} (${source}, ${platformLabel(platform)}). Auto-replies paused for ${HANDOFF_TIMEOUT_HOURS}h or until admin resolves.`
   );
   await sendMessage(senderId, HANDOFF_REPLY);
-  notifyHandoffByEmail(senderId, userText).catch((err) => {
+  notifyHandoffByEmail(senderId, userText, platform).catch((err) => {
     console.error("Handoff email failed:", err.message);
   });
 }
 
 /** Customer-requested handoff only — blocked outside live support hours. */
-async function attemptCustomerHandoff(senderId, userText, source) {
+async function attemptCustomerHandoff(
+  senderId,
+  userText,
+  source,
+  platform = "messenger"
+) {
   if (!isWithinLiveSupportHours()) {
     console.log(
       `Customer handoff blocked for ${senderId} (${source}) — outside support hours (${SUPPORT_HOURS_START}:00–${SUPPORT_HOURS_END}:00 ${SUPPORT_TIMEZONE}).`
@@ -957,7 +976,7 @@ async function attemptCustomerHandoff(senderId, userText, source) {
     }
     return false;
   }
-  await triggerHandoff(senderId, userText, source);
+  await triggerHandoff(senderId, userText, source, platform);
   return true;
 }
 
@@ -976,7 +995,7 @@ function getMailTransporter() {
   return mailTransporter;
 }
 
-async function notifyHandoffByEmail(senderId, userText) {
+async function notifyHandoffByEmail(senderId, userText, platform = "messenger") {
   if (!isEmailConfigured()) {
     console.warn(
       "Handoff email skipped — set RESEND_API_KEY on Render (recommended) or SMTP_* locally."
@@ -984,6 +1003,7 @@ async function notifyHandoffByEmail(senderId, userText) {
     return;
   }
 
+  const channel = platformLabel(platform);
   const handedOffAt = new Date().toISOString();
   const resumeUrl = buildResumeUrl(senderId, null, true);
   const adminPanelUrl =
@@ -992,15 +1012,16 @@ async function notifyHandoffByEmail(senderId, userText) {
       : "";
 
   const result = await sendAlertEmail({
-    subject: "Beantol Messenger — customer wants a human",
+    subject: `Beantol — customer wants a human (${channel})`,
     text: [
-      "A customer asked to speak with a real person on Messenger.",
+      `A customer asked to speak with a real person on ${channel}.`,
       "",
       `Time: ${handedOffAt}`,
+      `Channel: ${channel}`,
       `Sender ID: ${senderId}`,
       `Their message: ${userText}`,
       "",
-      "Bot auto-replies are paused. Reply in Meta Business Suite, then resume the bot:",
+      "Bot auto-replies are paused. Reply in Meta Business Suite (Messenger or Instagram inbox), then resume the bot:",
       resumeUrl ? `Resume AI + notify customer: ${resumeUrl}` : "(Set PUBLIC_BASE_URL on Render for one-click resume links)",
       adminPanelUrl ? `All paused chats: ${adminPanelUrl}` : "",
       "",
@@ -1025,7 +1046,12 @@ function markDeliveryAlertSent(senderId) {
   deliveryAlertCooldowns.set(senderId, Date.now() + DELIVERY_ALERT_COOLDOWN_MS);
 }
 
-async function notifyDeliveryByEmail(senderId, userText, source) {
+async function notifyDeliveryByEmail(
+  senderId,
+  userText,
+  source,
+  platform = "messenger"
+) {
   if (!shouldSendDeliveryAlert(senderId)) {
     console.log(
       `Delivery alert skipped for ${senderId} (cooldown — already emailed recently).`
@@ -1040,14 +1066,16 @@ async function notifyDeliveryByEmail(senderId, userText, source) {
     return false;
   }
 
+  const channel = platformLabel(platform);
   const now = new Date().toISOString();
   try {
     const result = await sendAlertEmail({
-      subject: "Beantol Messenger — Maxim delivery inquiry (bot still replying)",
+      subject: `Beantol — Maxim delivery inquiry (${channel})`,
       text: [
-        "A customer asked about delivery on Messenger.",
+        `A customer asked about delivery on ${channel}.`,
         "",
         `Time: ${now}`,
+        `Channel: ${channel}`,
         `Trigger: ${source}`,
         `Sender ID: ${senderId}`,
         `Their message: ${userText}`,
@@ -1111,6 +1139,7 @@ function listActiveHandoffs() {
     }
     handoffs.push({
       senderId,
+      platform: session.platform || "messenger",
       handedOffAt: new Date(session.handedOffAt).toISOString(),
       expiresAt: new Date(session.expiresAt).toISOString(),
       lastMessage: session.lastMessage,
@@ -1122,7 +1151,7 @@ function listActiveHandoffs() {
 
 // --- Health check (useful after deploy) ---
 app.get("/", (req, res) => {
-  res.send("Beantol Messenger bot is running.");
+  res.send("Beantol bot is running (Facebook Messenger + Instagram DMs).");
 });
 
 // --- Admin: simple dashboard (bookmark on phone/PC) ---
@@ -1134,6 +1163,7 @@ app.get("/admin", (req, res) => {
     .map((h) => {
       const resumeUrl = buildResumeUrl(h.senderId, req, true);
       return `<tr>
+        <td>${escapeHtml(h.platform === "instagram" ? "Instagram" : "Messenger")}</td>
         <td><code>${h.senderId}</code></td>
         <td>${escapeHtml(h.lastMessage)}</td>
         <td><a href="${resumeUrl}">Resume AI</a></td>
@@ -1153,7 +1183,7 @@ th{background:#f5f5f5}a.button{display:inline-block;margin-top:16px;padding:10px
 <h1>Beantol — paused chats</h1>
 <p class="muted">Paused count: <strong>${handoffs.length}</strong>. Tap <strong>Resume AI</strong> to clear handoff and send the customer the “assistant is back” message.</p>
 <p class="muted"><strong>#bot</strong> in Business Suite usually does <em>not</em> reach this server — use this page or the email link instead.</p>
-${handoffs.length ? `<table><tr><th>Customer ID</th><th>Last note</th><th></th></tr>${rows}</table>` : "<p>No active handoffs.</p>"}
+${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last note</th><th></th></tr>${rows}</table>` : "<p>No active handoffs.</p>"}
 <a class="button" href="/admin?token=${encodeURIComponent(req.query.token || "")}">Refresh</a>
 </body></html>`);
 });
@@ -1277,15 +1307,15 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// --- Facebook sends incoming messages here ---
+// --- Meta webhook: Facebook Page + Instagram DMs ---
 app.post("/webhook", (req, res) => {
   const body = req.body;
 
-  if (body.object !== "page") {
+  if (!isSupportedWebhookObject(body.object)) {
     return res.sendStatus(404);
   }
 
-  // Respond immediately so Facebook does not timeout
+  // Respond immediately so Meta does not timeout
   res.sendStatus(200);
 
   processWebhookEvents(body).catch((err) => {
@@ -1294,13 +1324,14 @@ app.post("/webhook", (req, res) => {
 });
 
 function collectMessagingEvents(body) {
+  const platform = webhookPlatform(body);
   const items = [];
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
-      items.push({ event, channel: "messaging" });
+      items.push({ event, channel: "messaging", platform });
     }
     for (const event of entry.standby || []) {
-      items.push({ event, channel: "standby" });
+      items.push({ event, channel: "standby", platform });
     }
   }
   return items;
@@ -1314,7 +1345,7 @@ async function ensurePageIdLoaded() {
 async function processWebhookEvents(body) {
   await ensurePageIdLoaded();
 
-  for (const { event, channel } of collectMessagingEvents(body)) {
+  for (const { event, channel, platform } of collectMessagingEvents(body)) {
     if (!event.message) continue;
 
     rememberPageIdFromEvent(event);
@@ -1322,7 +1353,7 @@ async function processWebhookEvents(body) {
     const text = event.message.text || "";
     if (DEBUG_WEBHOOK || /#bot/i.test(text)) {
       console.log(
-        `Webhook ${channel}: echo=${event.message.is_echo} sender=${event.sender?.id} recipient=${event.recipient?.id} pageId=${pageId} text=${JSON.stringify(text)}`
+        `Webhook ${platform}/${channel}: echo=${event.message.is_echo} sender=${event.sender?.id} recipient=${event.recipient?.id} pageId=${pageId} text=${JSON.stringify(text)}`
       );
     }
 
@@ -1334,15 +1365,15 @@ async function processWebhookEvents(body) {
     if (!text) continue;
 
     try {
-      await handleMessage(event.sender.id, event.message.text);
+      await handleMessage(event.sender.id, event.message.text, platform);
     } catch (err) {
       console.error("Error handling message:", err.message);
     }
   }
 }
 
-async function handleMessage(senderId, userText) {
-  console.log(`Message from ${senderId}: ${userText}`);
+async function handleMessage(senderId, userText, platform = "messenger") {
+  console.log(`Message from ${senderId} (${platformLabel(platform)}): ${userText}`);
 
   const activeHandoff = getActiveHandoff(senderId);
   if (activeHandoff) {
@@ -1353,7 +1384,7 @@ async function handleMessage(senderId, userText) {
   updateReplyLanguagePreference(senderId, userText);
 
   if (wantsHumanHandoff(userText, senderId)) {
-    await attemptCustomerHandoff(senderId, userText, "phrase match");
+    await attemptCustomerHandoff(senderId, userText, "phrase match", platform);
     return;
   }
 
@@ -1394,7 +1425,7 @@ async function handleMessage(senderId, userText) {
       !isDeliveryAgentOfferPending(senderId);
     if (!blockHandoff) {
       clearDeliveryAgentOfferPending(senderId);
-      if (!(await attemptCustomerHandoff(senderId, userText, "AI [[HANDOFF]] marker"))) {
+      if (!(await attemptCustomerHandoff(senderId, userText, "AI [[HANDOFF]] marker", platform))) {
         return;
       }
       return;
@@ -1417,8 +1448,8 @@ async function handleMessage(senderId, userText) {
           : null;
 
   if (deliveryTrigger) {
-    console.log(`Delivery alert for ${senderId} (${deliveryTrigger}).`);
-    await notifyDeliveryByEmail(senderId, userText, deliveryTrigger);
+    console.log(`Delivery alert for ${senderId} (${deliveryTrigger}, ${platform}).`);
+    await notifyDeliveryByEmail(senderId, userText, deliveryTrigger, platform);
   }
 
   if (openai) {
@@ -1571,5 +1602,5 @@ loadPageId().catch(() => {});
 
 app.listen(PORT, () => {
   console.log(`Beantol bot listening on port ${PORT}`);
-  console.log(`Webhook URL path: /webhook`);
+  console.log(`Webhook URL path: /webhook (Facebook Page + Instagram)`);
 });
