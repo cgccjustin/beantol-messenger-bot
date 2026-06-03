@@ -39,31 +39,50 @@ const replyLanguagePrefs = new Map();
 const botSentMessageIds = new Set();
 const BOT_MID_MAX = 500;
 
-function updateReplyLanguagePreference(senderId, userText) {
-  const t = userText.trim();
+/** Detect if the customer wants bot reply language changed (not human handoff). */
+function detectReplyLanguagePreference(text) {
+  const t = text.trim();
+  if (!t) return null;
+
   if (
-    /\b(?:reply|respond|answer|speak|write).*(?:in )?english\b/i.test(t) ||
+    /\b(?:reply|respond|answer|speak|write|sagot|tubag).*(?:in )?english\b/i.test(t) ||
     /\benglish (?:only|please|na lang|pls)\b/i.test(t) ||
     /\bswitch (?:back )?to english\b/i.test(t)
   ) {
-    replyLanguagePrefs.set(senderId, "en");
-    return;
+    return "en";
   }
+
   if (
     /\b(?:reply|respond|answer|speak|write).*(?:in )?(?:tagalog|filipino)\b/i.test(t) ||
     /\btagalog (?:only|please|na lang|pls|lang)\b/i.test(t) ||
-    /paki-?tagalog/i.test(t)
+    /paki-?tagalog/i.test(t) ||
+    /\b(?:puede|pwede|puede)\s+ka\s+mag\s+tagalog\b/i.test(t)
   ) {
-    replyLanguagePrefs.set(senderId, "tl");
-    return;
+    return "tl";
   }
+
   if (
     /\b(?:reply|respond|answer|speak|write).*(?:in )?(?:cebuano|bisaya)\b/i.test(t) ||
     /\b(?:cebuano|bisaya) (?:only|please|na lang|pls|lang)\b/i.test(t) ||
-    /\bbisaya lang\b/i.test(t)
+    /\bbisaya lang\b/i.test(t) ||
+    /\b(?:puede|pwede|puede)\s+ka\s+mag\s+(?:bisaya|cebuano)\b/i.test(t) ||
+    /\b(?:can you|could you)\s+(?:speak|reply|talk|write)\s+(?:in\s+)?(?:bisaya|cebuano)\b/i.test(t) ||
+    /\b(?:mag|sa)\s+(?:bisaya|cebuano)\b/i.test(t) &&
+      /\b(?:ka|mo|ba|lang|please|pls|puede|pwede)\b/i.test(t)
   ) {
-    replyLanguagePrefs.set(senderId, "ceb");
+    return "ceb";
   }
+
+  return null;
+}
+
+function isReplyLanguagePreferenceRequest(text) {
+  return detectReplyLanguagePreference(text) !== null;
+}
+
+function updateReplyLanguagePreference(senderId, userText) {
+  const pref = detectReplyLanguagePreference(userText);
+  if (pref) replyLanguagePrefs.set(senderId, pref);
 }
 
 function getReplyLanguageInstruction(senderId) {
@@ -113,8 +132,9 @@ POPULAR PRODUCTS (prices in Philippine Pesos):
 RULES:
 - Keep replies short (2–4 sentences) unless the customer asks for more detail.
 - Tone: friendly, warm, professional.
-- LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used. Writing in Cebuano, Tagalog, or Bislish does NOT mean you should reply in that language. Examples: "Naa mo?" / "Open pa?" / "Tagpila?" → answer in English. Only use Tagalog or Cebuano when the server says the customer explicitly requested that reply language.
-- HUMAN HANDOFF: If the customer wants a real person, agent, staff, or to chat with someone who is not the bot (any wording), respond with exactly [[HANDOFF]] and nothing else — no location, no prices, no "team member will reply" text. The server sends the real handoff message and pauses the bot.
+- LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used unless the server says they requested Bisaya/Cebuano or Tagalog replies. Examples: "Naa mo?" / "Open pa?" → English. "Puede ka mag bisaya?" / "Bisaya lang" → Cebuano/Bisaya (NOT handoff).
+- LANGUAGE CHANGE IS NOT HANDOFF: If they only want you to speak/reply in Bisaya, Cebuano, or Tagalog (e.g. "puede ka mag bisaya", "Tagalog please"), answer in that language — never use [[HANDOFF]] for language requests.
+- HUMAN HANDOFF: Only if they want a real person, agent, or staff — not the bot. Then respond with exactly [[HANDOFF]] and nothing else. The server sends the handoff message and pauses the bot.
 - If you do not know something (custom orders, stock today, wholesale pricing), say you are not sure and offer to connect them with a team member — they can ask for a person in their own words or leave their name and number.
 - Do not invent products, prices, or policies not listed above.`;
 
@@ -160,6 +180,7 @@ const HANDOFF_TARGET_WORDS =
 function wantsHumanHandoff(text) {
   const normalized = text.trim();
   if (!normalized) return false;
+  if (isReplyLanguagePreferenceRequest(normalized)) return false;
   if (HANDOFF_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
   return (
     HANDOFF_INTENT_WORDS.test(normalized) && HANDOFF_TARGET_WORDS.test(normalized)
@@ -397,6 +418,8 @@ async function handleMessage(senderId, userText) {
     return;
   }
 
+  updateReplyLanguagePreference(senderId, userText);
+
   if (wantsHumanHandoff(userText)) {
     await triggerHandoff(senderId, userText, "phrase match");
     return;
@@ -409,7 +432,6 @@ async function handleMessage(senderId, userText) {
       "Bot is running but OpenAI is not configured yet. Please add OPENAI_API_KEY.";
   } else {
     try {
-      updateReplyLanguagePreference(senderId, userText);
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
         messages: [
@@ -429,7 +451,7 @@ async function handleMessage(senderId, userText) {
     }
   }
 
-  if (isAiHandoffReply(reply)) {
+  if (isAiHandoffReply(reply) && !isReplyLanguagePreferenceRequest(userText)) {
     await triggerHandoff(senderId, userText, "AI [[HANDOFF]] marker");
     return;
   }
