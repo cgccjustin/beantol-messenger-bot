@@ -35,6 +35,10 @@ const handoffSessions = new Map();
 /** @type {Map<string, 'en' | 'tl' | 'ceb'>} */
 const replyLanguagePrefs = new Map();
 
+/** @type {Map<string, number>} senderId -> alert cooldown expiresAt */
+const deliveryAlertCooldowns = new Map();
+const DELIVERY_ALERT_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+
 /** Message IDs sent by this bot — used to ignore echoes of our own replies */
 const botSentMessageIds = new Set();
 const BOT_MID_MAX = 500;
@@ -128,7 +132,9 @@ DELIVERY:
 - Delivery is arranged via Maxim (third-party rider app).
 - The delivery fee is shouldered by the customer (not included in the coffee price unless you state otherwise).
 - When a customer asks about delivery, wants delivery, or orders for delivery: briefly confirm Maxim delivery and that the customer pays the delivery fee, then ask for (1) complete delivery address, (2) contact name, and (3) mobile/contact number. Keep it friendly and in one short reply.
-- Do not invent delivery fees, zones, or timelines. If details are unclear, offer to connect them with a team member.
+- Do NOT use [[HANDOFF]] for delivery questions — keep helping in chat and collect details here.
+- Never say "call me", "call us", "message us on Messenger", or suggest buttons/CTAs. Plain text only in this thread.
+- Do not invent delivery fees, zones, or timelines.
 
 POPULAR PRODUCTS (prices in Philippine Pesos):
 - Beantol Prime — ₱1,450
@@ -142,7 +148,7 @@ RULES:
 - LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used unless the server says they requested Bisaya/Cebuano or Tagalog replies. Examples: "Naa mo?" / "Open pa?" → English. "Puede ka mag bisaya?" / "Bisaya lang" → Cebuano/Bisaya (NOT handoff).
 - LANGUAGE CHANGE IS NOT HANDOFF: Switching language is not handoff. Examples: "puede ka mag bisaya" → Bisaya; "English balik bi" / "balik english" / "English please" → English again. Never use [[HANDOFF]] for language switches.
 - HUMAN HANDOFF: Only if they want a real person, agent, or staff — not the bot. Then respond with exactly [[HANDOFF]] and nothing else. The server sends the handoff message and pauses the bot.
-- If you do not know something (custom orders, stock today, wholesale pricing), say you are not sure and offer to connect them with a team member — they can ask for a person in their own words or leave their name and number.
+- If you do not know something (custom orders, stock today, wholesale pricing), say you are not sure and ask them to leave details in chat. Do not suggest calling or Messenger buttons. Use [[HANDOFF]] only when they explicitly want a real person/agent — not for delivery.
 - Do not invent products, prices, or policies not listed above.`;
 
 const openai = OPENAI_API_KEY
@@ -184,14 +190,38 @@ const HANDOFF_INTENT_WORDS =
 const HANDOFF_TARGET_WORDS =
   /\b(agent|human|person|people|staff|someone|representative|tao|employee|team member|real person|live person|operator)\b/i;
 
+function isDeliveryInquiry(text) {
+  const t = text.trim();
+  if (!t) return false;
+  return /\b(?:delivery|deliver|padala|hatod|shipping|ship|maxim)\b/i.test(t);
+}
+
 function wantsHumanHandoff(text) {
   const normalized = text.trim();
   if (!normalized) return false;
   if (isReplyLanguagePreferenceRequest(normalized)) return false;
+  if (isDeliveryInquiry(normalized) && !/\b(?:person|human|agent|staff|tao|representative)\b/i.test(normalized)) {
+    return false;
+  }
   if (HANDOFF_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
   return (
     HANDOFF_INTENT_WORDS.test(normalized) && HANDOFF_TARGET_WORDS.test(normalized)
   );
+}
+
+function sanitizeBotReply(text) {
+  let out = text.trim();
+  const stripPatterns = [
+    /call (?:us|me)(?:\s+on|\s+in)?\s*messenger[^\n]*/gi,
+    /message us(?:\s+on)?\s*messenger[^\n]*/gi,
+    /contact us(?:\s+on)?\s*messenger[^\n]*/gi,
+    /(?:tap|click)\s+(?:the\s+)?button[^\n]*/gi,
+    /send (?:us\s+)?a message(?:\s+on messenger)?[^\n]*/gi,
+  ];
+  for (const pattern of stripPatterns) {
+    out = out.replace(pattern, "");
+  }
+  return out.replace(/\n{3,}/g, "\n\n").replace(/  +/g, " ").trim() || text.trim();
 }
 
 function isAiHandoffReply(reply) {
@@ -315,6 +345,46 @@ async function notifyHandoffByEmail(senderId, userText) {
   console.log(`Handoff email sent to ${HANDOFF_NOTIFY_EMAIL}`);
 }
 
+function shouldSendDeliveryAlert(senderId) {
+  const expiresAt = deliveryAlertCooldowns.get(senderId);
+  if (expiresAt && Date.now() < expiresAt) return false;
+  return true;
+}
+
+function markDeliveryAlertSent(senderId) {
+  deliveryAlertCooldowns.set(senderId, Date.now() + DELIVERY_ALERT_COOLDOWN_MS);
+}
+
+async function notifyDeliveryByEmail(senderId, userText) {
+  if (!shouldSendDeliveryAlert(senderId)) return;
+
+  const transporter = getMailTransporter();
+  if (!transporter) {
+    console.warn("Delivery alert email skipped — SMTP not configured.");
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await transporter.sendMail({
+    from: SMTP_FROM,
+    to: HANDOFF_NOTIFY_EMAIL,
+    subject: "Beantol Messenger — Maxim delivery inquiry (bot still replying)",
+    text: [
+      "A customer asked about delivery on Messenger.",
+      "",
+      `Time: ${now}`,
+      `Sender ID: ${senderId}`,
+      `Their message: ${userText}`,
+      "",
+      "The bot is still auto-replying and collecting address, name, and phone in the chat.",
+      "Reply in Meta Business Suite when you take over — that will pause the bot for this customer.",
+    ].join("\n"),
+  });
+
+  markDeliveryAlertSent(senderId);
+  console.log(`Delivery alert email sent to ${HANDOFF_NOTIFY_EMAIL} for ${senderId}`);
+}
+
 function requireAdmin(req, res) {
   if (!ADMIN_SECRET) {
     res.status(503).json({ error: "ADMIN_SECRET is not configured on the server." });
@@ -432,6 +502,12 @@ async function handleMessage(senderId, userText) {
     return;
   }
 
+  if (isDeliveryInquiry(userText)) {
+    notifyDeliveryByEmail(senderId, userText).catch((err) => {
+      console.error("Delivery alert email failed:", err.message);
+    });
+  }
+
   let reply;
 
   if (!openai) {
@@ -458,12 +534,16 @@ async function handleMessage(senderId, userText) {
     }
   }
 
-  if (isAiHandoffReply(reply) && !isReplyLanguagePreferenceRequest(userText)) {
+  if (
+    isAiHandoffReply(reply) &&
+    !isReplyLanguagePreferenceRequest(userText) &&
+    !isDeliveryInquiry(userText)
+  ) {
     await triggerHandoff(senderId, userText, "AI [[HANDOFF]] marker");
     return;
   }
 
-  await sendMessage(senderId, reply);
+  await sendMessage(senderId, sanitizeBotReply(reply));
 }
 
 async function sendMessage(recipientId, text) {
