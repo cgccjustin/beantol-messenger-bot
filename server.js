@@ -42,6 +42,8 @@ const ADMIN_RESUME_COMMANDS = (process.env.ADMIN_RESUME_COMMANDS || "#bot")
   .split(",")
   .map((cmd) => cmd.trim().toLowerCase())
   .filter(Boolean);
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+const DEBUG_WEBHOOK = process.env.DEBUG_WEBHOOK === "true";
 
 /** @type {Map<string, { handedOffAt: number, expiresAt: number, lastMessage: string }>} */
 const handoffSessions = new Map();
@@ -401,8 +403,10 @@ function normalizeCommandText(text) {
 
 /** True when an admin sent a resume command (e.g. #bot) from Business Suite. */
 function isAdminResumeCommand(text) {
+  const raw = (text || "").trim();
+  if (!raw) return false;
+  if (/#bot\b/i.test(raw) || /\bbot\s*#/i.test(raw)) return true;
   const normalized = normalizeCommandText(text);
-  if (!normalized) return false;
   return ADMIN_RESUME_COMMANDS.some((cmd) => {
     const target = normalizeCommandText(cmd);
     return normalized === target || normalized.includes(target);
@@ -559,9 +563,11 @@ async function notifyHandoffByEmail(senderId, userText) {
   }
 
   const handedOffAt = new Date().toISOString();
-  const resolveHint = ADMIN_SECRET
-    ? `Mark handled (resume bot): POST /admin/handoffs/${senderId}/resolve?token=YOUR_ADMIN_SECRET`
-    : "Mark handled via POST /admin/handoffs/:senderId/resolve when ADMIN_SECRET is set.";
+  const resumeUrl = buildResumeUrl(senderId, null, true);
+  const adminPanelUrl =
+    PUBLIC_BASE_URL && ADMIN_SECRET
+      ? `${PUBLIC_BASE_URL}/admin?token=${encodeURIComponent(ADMIN_SECRET)}`
+      : "";
 
   const result = await sendAlertEmail({
     subject: "Beantol Messenger — customer wants a human",
@@ -572,10 +578,14 @@ async function notifyHandoffByEmail(senderId, userText) {
       `Sender ID: ${senderId}`,
       `Their message: ${userText}`,
       "",
-      "Bot auto-replies are paused for this customer. Reply in Meta Business Suite / Messenger.",
+      "Bot auto-replies are paused. Reply in Meta Business Suite, then resume the bot:",
+      resumeUrl ? `Resume AI + notify customer: ${resumeUrl}` : "(Set PUBLIC_BASE_URL on Render for one-click resume links)",
+      adminPanelUrl ? `All paused chats: ${adminPanelUrl}` : "",
       "",
-      resolveHint,
-    ].join("\n"),
+      "Note: #bot in Business Suite often does not reach the server. Use the resume link above instead.",
+    ]
+      .filter(Boolean)
+      .join("\n"),
   });
 
   console.log(
@@ -651,15 +661,24 @@ function requireAdmin(req, res) {
   return true;
 }
 
-// --- Health check (useful after deploy) ---
-app.get("/", (req, res) => {
-  res.send("Beantol Messenger bot is running.");
-});
+function getPublicBaseUrl(req) {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
+  if (!req) return "";
+  const host = req.get("host");
+  if (!host) return "";
+  const proto = req.get("x-forwarded-proto") || req.protocol || "https";
+  return `${proto}://${host}`;
+}
 
-// --- Admin: list conversations waiting for a human ---
-app.get("/admin/handoffs", (req, res) => {
-  if (!requireAdmin(req, res)) return;
+function buildResumeUrl(senderId, req, sendResume = true) {
+  const base = getPublicBaseUrl(req);
+  if (!base || !ADMIN_SECRET) return "";
+  const params = new URLSearchParams({ token: ADMIN_SECRET });
+  if (sendResume) params.set("sendResume", "1");
+  return `${base}/admin/handoffs/${encodeURIComponent(senderId)}/resolve?${params}`;
+}
 
+function listActiveHandoffs() {
   const now = Date.now();
   const handoffs = [];
 
@@ -668,7 +687,6 @@ app.get("/admin/handoffs", (req, res) => {
       handoffSessions.delete(senderId);
       continue;
     }
-
     handoffs.push({
       senderId,
       handedOffAt: new Date(session.handedOffAt).toISOString(),
@@ -677,6 +695,59 @@ app.get("/admin/handoffs", (req, res) => {
     });
   }
 
+  return handoffs;
+}
+
+// --- Health check (useful after deploy) ---
+app.get("/", (req, res) => {
+  res.send("Beantol Messenger bot is running.");
+});
+
+// --- Admin: simple dashboard (bookmark on phone/PC) ---
+app.get("/admin", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const handoffs = listActiveHandoffs();
+  const rows = handoffs
+    .map((h) => {
+      const resumeUrl = buildResumeUrl(h.senderId, req, true);
+      return `<tr>
+        <td><code>${h.senderId}</code></td>
+        <td>${escapeHtml(h.lastMessage)}</td>
+        <td><a href="${resumeUrl}">Resume AI</a></td>
+      </tr>`;
+    })
+    .join("");
+
+  res.type("html").send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Beantol bot admin</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:720px;margin:24px auto;padding:0 16px}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left}
+th{background:#f5f5f5}a.button{display:inline-block;margin-top:16px;padding:10px 16px;background:#2d6a4f;color:#fff;text-decoration:none;border-radius:6px}
+.muted{color:#666;font-size:14px}
+</style></head><body>
+<h1>Beantol — paused chats</h1>
+<p class="muted">Paused count: <strong>${handoffs.length}</strong>. Tap <strong>Resume AI</strong> to clear handoff and send the customer the “assistant is back” message.</p>
+<p class="muted"><strong>#bot</strong> in Business Suite usually does <em>not</em> reach this server — use this page or the email link instead.</p>
+${handoffs.length ? `<table><tr><th>Customer ID</th><th>Last note</th><th></th></tr>${rows}</table>` : "<p>No active handoffs.</p>"}
+<a class="button" href="/admin?token=${encodeURIComponent(req.query.token || "")}">Refresh</a>
+</body></html>`);
+});
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// --- Admin: list conversations waiting for a human ---
+app.get("/admin/handoffs", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const handoffs = listActiveHandoffs();
   res.json({ count: handoffs.length, handoffs });
 });
 
@@ -726,12 +797,26 @@ async function resolveHandoffHandler(req, res) {
     }
   }
 
-  res.json({
+  const payload = {
     ok: true,
     senderId,
     message: "Handoff cleared. Bot will auto-reply again.",
     resumeMessageSent: req.query.sendResume === "1",
-  });
+  };
+
+  if (req.method === "GET" && !req.headers.accept?.includes("application/json")) {
+    const backUrl = `/admin?token=${encodeURIComponent(req.query.token || "")}`;
+    return res.type("html").send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Handoff cleared</title></head><body style="font-family:system-ui,sans-serif;max-width:480px;margin:40px auto;padding:0 16px">
+<h1>Handoff cleared</h1>
+<p>The AI assistant is active again for customer <code>${senderId}</code>.</p>
+<p>${req.query.sendResume === "1" ? "The customer should receive the “assistant is back” message shortly." : "Add <code>&sendResume=1</code> to the URL to send the assistant message."}</p>
+<p><a href="${backUrl}">Back to admin dashboard</a></p>
+</body></html>`);
+  }
+
+  res.json(payload);
 }
 
 // --- Admin: clear handoff (POST or GET — open GET link in browser) ---
@@ -769,23 +854,48 @@ app.post("/webhook", (req, res) => {
   });
 });
 
-async function processWebhookEvents(body) {
+function collectMessagingEvents(body) {
+  const items = [];
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
-      if (!event.message) continue;
+      items.push({ event, channel: "messaging" });
+    }
+    for (const event of entry.standby || []) {
+      items.push({ event, channel: "standby" });
+    }
+  }
+  return items;
+}
 
-      if (isOutboundFromPage(event)) {
-        await handlePageOutbound(event);
-        continue;
-      }
+async function ensurePageIdLoaded() {
+  if (pageId) return;
+  await loadPageId();
+}
 
-      if (!event.message.text) continue;
+async function processWebhookEvents(body) {
+  await ensurePageIdLoaded();
 
-      try {
-        await handleMessage(event.sender.id, event.message.text);
-      } catch (err) {
-        console.error("Error handling message:", err.message);
-      }
+  for (const { event, channel } of collectMessagingEvents(body)) {
+    if (!event.message) continue;
+
+    const text = event.message.text || "";
+    if (DEBUG_WEBHOOK || /#bot/i.test(text)) {
+      console.log(
+        `Webhook ${channel}: echo=${event.message.is_echo} sender=${event.sender?.id} recipient=${event.recipient?.id} pageId=${pageId} text=${JSON.stringify(text)}`
+      );
+    }
+
+    if (isOutboundFromPage(event)) {
+      await handlePageOutbound(event);
+      continue;
+    }
+
+    if (!text) continue;
+
+    try {
+      await handleMessage(event.sender.id, event.message.text);
+    } catch (err) {
+      console.error("Error handling message:", err.message);
     }
   }
 }
@@ -920,6 +1030,9 @@ function checkConfig() {
     missing.push(
       "RESEND_API_KEY (recommended on Render) or SMTP_HOST / SMTP_USER / SMTP_PASS"
     );
+  }
+  if (!PUBLIC_BASE_URL) {
+    missing.push("PUBLIC_BASE_URL (one-click resume links in email/admin, e.g. https://beantol-bot.onrender.com)");
   }
 
   if (missing.length) {
