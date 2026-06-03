@@ -46,8 +46,15 @@ function detectReplyLanguagePreference(text) {
 
   if (
     /\b(?:reply|respond|answer|speak|write|sagot|tubag).*(?:in )?english\b/i.test(t) ||
-    /\benglish (?:only|please|na lang|pls)\b/i.test(t) ||
-    /\bswitch (?:back )?to english\b/i.test(t)
+    /\benglish (?:only|please|na lang|pls|po)\b/i.test(t) ||
+    /\bswitch (?:back )?to english\b/i.test(t) ||
+    /\bback\s+to\s+english\b/i.test(t) ||
+    /\benglish\s+balik\b/i.test(t) ||
+    /\bbalik\s+(?:sa\s+)?english\b/i.test(t) ||
+    /\b(?:balik|back)\b.*\b(?:english|inglish)\b/i.test(t) ||
+    /\b(?:english|inglish)\b.*\b(?:balik|back)\b/i.test(t) ||
+    (/\b(?:english|inglish)\b/i.test(t) &&
+      /\b(?:balik|back|switch|return|na lang|nlng)\b/i.test(t))
   ) {
     return "en";
   }
@@ -67,8 +74,8 @@ function detectReplyLanguagePreference(text) {
     /\bbisaya lang\b/i.test(t) ||
     /\b(?:puede|pwede|puede)\s+ka\s+mag\s+(?:bisaya|cebuano)\b/i.test(t) ||
     /\b(?:can you|could you)\s+(?:speak|reply|talk|write)\s+(?:in\s+)?(?:bisaya|cebuano)\b/i.test(t) ||
-    /\b(?:mag|sa)\s+(?:bisaya|cebuano)\b/i.test(t) &&
-      /\b(?:ka|mo|ba|lang|please|pls|puede|pwede)\b/i.test(t)
+    (/\b(?:mag|sa)\s+(?:bisaya|cebuano)\b/i.test(t) &&
+      /\b(?:ka|mo|lang|please|pls|puede|pwede)\b/i.test(t))
   ) {
     return "ceb";
   }
@@ -133,7 +140,7 @@ RULES:
 - Keep replies short (2–4 sentences) unless the customer asks for more detail.
 - Tone: friendly, warm, professional.
 - LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used unless the server says they requested Bisaya/Cebuano or Tagalog replies. Examples: "Naa mo?" / "Open pa?" → English. "Puede ka mag bisaya?" / "Bisaya lang" → Cebuano/Bisaya (NOT handoff).
-- LANGUAGE CHANGE IS NOT HANDOFF: If they only want you to speak/reply in Bisaya, Cebuano, or Tagalog (e.g. "puede ka mag bisaya", "Tagalog please"), answer in that language — never use [[HANDOFF]] for language requests.
+- LANGUAGE CHANGE IS NOT HANDOFF: Switching language is not handoff. Examples: "puede ka mag bisaya" → Bisaya; "English balik bi" / "balik english" / "English please" → English again. Never use [[HANDOFF]] for language switches.
 - HUMAN HANDOFF: Only if they want a real person, agent, or staff — not the bot. Then respond with exactly [[HANDOFF]] and nothing else. The server sends the handoff message and pauses the bot.
 - If you do not know something (custom orders, stock today, wholesale pricing), say you are not sure and offer to connect them with a team member — they can ask for a person in their own words or leave their name and number.
 - Do not invent products, prices, or policies not listed above.`;
