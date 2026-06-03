@@ -22,6 +22,9 @@ const HANDOFF_NOTIFY_EMAIL =
   process.env.HANDOFF_NOTIFY_EMAIL || "cgccjustin@gmail.com";
 const DELIVERY_ALERT_COOLDOWN_MS =
   Number(process.env.DELIVERY_ALERT_COOLDOWN_MINUTES || 240) * 60 * 1000;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const EMAIL_FROM =
+  process.env.EMAIL_FROM || "onboarding@resend.dev";
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
 const SMTP_USER = process.env.SMTP_USER;
@@ -251,6 +254,20 @@ function isSmtpConfigured() {
   return true;
 }
 
+function isResendConfigured() {
+  return Boolean(RESEND_API_KEY && RESEND_API_KEY.trim().startsWith("re_"));
+}
+
+function isEmailConfigured() {
+  return isResendConfigured() || isSmtpConfigured();
+}
+
+function getEmailProvider() {
+  if (isResendConfigured()) return "resend";
+  if (isSmtpConfigured()) return "smtp";
+  return null;
+}
+
 function getActiveHandoff(senderId) {
   const session = handoffSessions.get(senderId);
   if (!session) return null;
@@ -304,6 +321,50 @@ function handlePageMessageEcho(event) {
 
 let mailTransporter = null;
 
+async function sendAlertEmail({ subject, text }) {
+  const provider = getEmailProvider();
+  if (!provider) {
+    throw new Error(
+      "Email not configured. Set RESEND_API_KEY on Render (recommended) or SMTP_* for local dev."
+    );
+  }
+
+  if (provider === "resend") {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: EMAIL_FROM,
+        to: [HANDOFF_NOTIFY_EMAIL],
+        subject,
+        text,
+      }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || data.error || `Resend HTTP ${response.status}`);
+    }
+    return { provider: "resend", id: data.id };
+  }
+
+  const transporter = getMailTransporter();
+  if (!transporter) {
+    throw new Error("SMTP transporter unavailable.");
+  }
+
+  const info = await transporter.sendMail({
+    from: SMTP_FROM,
+    to: HANDOFF_NOTIFY_EMAIL,
+    subject,
+    text,
+  });
+  return { provider: "smtp", id: info.messageId };
+}
+
 async function triggerHandoff(senderId, userText, source) {
   startHandoff(senderId, userText);
   console.log(
@@ -323,15 +384,18 @@ function getMailTransporter() {
       port: SMTP_PORT,
       secure: SMTP_PORT === 465,
       auth: { user: SMTP_USER, pass: SMTP_PASS },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
     });
   }
   return mailTransporter;
 }
 
 async function notifyHandoffByEmail(senderId, userText) {
-  const transporter = getMailTransporter();
-  if (!transporter) {
-    console.warn("Handoff email skipped — set SMTP_HOST, SMTP_USER, and SMTP_PASS in .env");
+  if (!isEmailConfigured()) {
+    console.warn(
+      "Handoff email skipped — set RESEND_API_KEY on Render (recommended) or SMTP_* locally."
+    );
     return;
   }
 
@@ -340,9 +404,7 @@ async function notifyHandoffByEmail(senderId, userText) {
     ? `Mark handled (resume bot): POST /admin/handoffs/${senderId}/resolve?token=YOUR_ADMIN_SECRET`
     : "Mark handled via POST /admin/handoffs/:senderId/resolve when ADMIN_SECRET is set.";
 
-  await transporter.sendMail({
-    from: SMTP_FROM,
-    to: HANDOFF_NOTIFY_EMAIL,
+  const result = await sendAlertEmail({
     subject: "Beantol Messenger — customer wants a human",
     text: [
       "A customer asked to speak with a real person on Messenger.",
@@ -357,7 +419,9 @@ async function notifyHandoffByEmail(senderId, userText) {
     ].join("\n"),
   });
 
-  console.log(`Handoff email sent to ${HANDOFF_NOTIFY_EMAIL}`);
+  console.log(
+    `Handoff email sent to ${HANDOFF_NOTIFY_EMAIL} via ${result.provider}`
+  );
 }
 
 function shouldSendDeliveryAlert(senderId) {
@@ -378,19 +442,16 @@ async function notifyDeliveryByEmail(senderId, userText, source) {
     return false;
   }
 
-  const transporter = getMailTransporter();
-  if (!transporter) {
+  if (!isEmailConfigured()) {
     console.warn(
-      "Delivery alert email skipped — SMTP not configured on server (check Render Environment: SMTP_HOST, SMTP_USER, SMTP_PASS)."
+      "Delivery alert email skipped — set RESEND_API_KEY on Render (recommended) or SMTP_* locally."
     );
     return false;
   }
 
   const now = new Date().toISOString();
   try {
-    await transporter.sendMail({
-      from: SMTP_FROM,
-      to: HANDOFF_NOTIFY_EMAIL,
+    const result = await sendAlertEmail({
       subject: "Beantol Messenger — Maxim delivery inquiry (bot still replying)",
       text: [
         "A customer asked about delivery on Messenger.",
@@ -404,15 +465,15 @@ async function notifyDeliveryByEmail(senderId, userText, source) {
         "Reply in Meta Business Suite when you take over — that will pause the bot for this customer.",
       ].join("\n"),
     });
+    markDeliveryAlertSent(senderId);
+    console.log(
+      `Delivery alert email sent to ${HANDOFF_NOTIFY_EMAIL} for ${senderId} (${source}) via ${result.provider}.`
+    );
   } catch (err) {
     console.error("Delivery alert email failed:", err.message);
     return false;
   }
 
-  markDeliveryAlertSent(senderId);
-  console.log(
-    `Delivery alert email sent to ${HANDOFF_NOTIFY_EMAIL} for ${senderId} (${source}).`
-  );
   return true;
 }
 
@@ -460,27 +521,29 @@ app.get("/admin/handoffs", (req, res) => {
   res.json({ count: handoffs.length, handoffs });
 });
 
-// --- Admin: send a test email (verify SMTP on Render) ---
+// --- Admin: send a test email (Resend or SMTP) ---
 app.get("/admin/test-email", async (req, res) => {
   if (!requireAdmin(req, res)) return;
 
-  const transporter = getMailTransporter();
-  if (!transporter) {
+  if (!isEmailConfigured()) {
     return res.status(503).json({
-      error: "SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS on Render.",
+      error:
+        "Email not configured. On Render, set RESEND_API_KEY (recommended). For local dev, SMTP_* also works.",
     });
   }
 
   try {
-    await transporter.sendMail({
-      from: SMTP_FROM,
-      to: HANDOFF_NOTIFY_EMAIL,
+    const result = await sendAlertEmail({
       subject: "Beantol Messenger — test email",
-      text: "If you received this, SMTP is working on your server.",
+      text: `If you received this, email is working via ${getEmailProvider()}.`,
     });
-    res.json({ ok: true, sentTo: HANDOFF_NOTIFY_EMAIL });
+    res.json({
+      ok: true,
+      sentTo: HANDOFF_NOTIFY_EMAIL,
+      provider: result.provider,
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, provider: getEmailProvider() });
   }
 });
 
@@ -637,8 +700,10 @@ function checkConfig() {
   if (!PAGE_ACCESS_TOKEN) missing.push("PAGE_ACCESS_TOKEN");
   if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY (bot will send a placeholder reply)");
   if (!ADMIN_SECRET) missing.push("ADMIN_SECRET (admin handoff endpoints disabled)");
-  if (!isSmtpConfigured()) {
-    missing.push("SMTP_HOST / SMTP_USER / SMTP_PASS (handoff emails disabled or placeholder)");
+  if (!isEmailConfigured()) {
+    missing.push(
+      "RESEND_API_KEY (recommended on Render) or SMTP_HOST / SMTP_USER / SMTP_PASS"
+    );
   }
 
   if (missing.length) {
@@ -646,21 +711,33 @@ function checkConfig() {
   }
 }
 
-async function verifySmtpOnStartup() {
+async function verifyEmailOnStartup() {
+  const provider = getEmailProvider();
+  if (!provider) return;
+
+  if (provider === "resend") {
+    console.log(
+      `Email via Resend — alerts go to ${HANDOFF_NOTIFY_EMAIL} (from ${EMAIL_FROM})`
+    );
+    return;
+  }
+
   const transporter = getMailTransporter();
   if (!transporter) return;
   try {
     await transporter.verify();
     console.log(
-      `SMTP ready — alerts go to ${HANDOFF_NOTIFY_EMAIL} (handoff + delivery)`
+      `Email via SMTP — alerts go to ${HANDOFF_NOTIFY_EMAIL} (may fail on Render due to blocked ports)`
     );
   } catch (err) {
-    console.error("SMTP verify failed (handoff emails will not send):", err.message);
+    console.error(
+      `SMTP verify failed (${err.message}). Use RESEND_API_KEY on Render instead.`
+    );
   }
 }
 
 checkConfig();
-verifySmtpOnStartup().catch(() => {});
+verifyEmailOnStartup().catch(() => {});
 
 app.listen(PORT, () => {
   console.log(`Beantol bot listening on port ${PORT}`);
