@@ -45,6 +45,13 @@ const ADMIN_RESUME_COMMANDS = (process.env.ADMIN_RESUME_COMMANDS || "#bot")
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
 const DEBUG_WEBHOOK = process.env.DEBUG_WEBHOOK === "true";
 const PAGE_ID_ENV = process.env.PAGE_ID;
+const SUPPORT_TIMEZONE = process.env.SUPPORT_TIMEZONE || "Asia/Manila";
+const SUPPORT_HOURS_START = Number(process.env.SUPPORT_HOURS_START || 9);
+const SUPPORT_HOURS_END = Number(process.env.SUPPORT_HOURS_END || 21);
+
+const AFTER_HOURS_HANDOFF_REPLY =
+  process.env.AFTER_HOURS_HANDOFF_REPLY ||
+  "Sorry — there is no customer support agent available to chat at this hour. Our team can connect with you live on Messenger daily from 9:00 AM to 9:00 PM (Philippine time). I can still help you here with questions about coffee, prices, orders, and delivery. You can also leave your message and check back during support hours, or message again between 9 AM and 9 PM when an agent can assist. How can I help you now?";
 
 /** @type {Map<string, { handedOffAt: number, expiresAt: number, lastMessage: string }>} */
 const handoffSessions = new Map();
@@ -90,6 +97,28 @@ function appendChatHistory(senderId, userText, assistantReply) {
   }
   entry.updatedAt = Date.now();
   chatHistories.set(senderId, entry);
+}
+
+function getSupportLocalHour() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: SUPPORT_TIMEZONE,
+    hour: "numeric",
+    hour12: false,
+  }).formatToParts(new Date());
+  const hourPart = parts.find((p) => p.type === "hour");
+  return Number(hourPart?.value ?? 0);
+}
+
+function isWithinLiveSupportHours() {
+  const hour = getSupportLocalHour();
+  return hour >= SUPPORT_HOURS_START && hour < SUPPORT_HOURS_END;
+}
+
+function getSupportHoursSystemNote() {
+  if (isWithinLiveSupportHours()) {
+    return `Live customer support handoff is available now (${SUPPORT_HOURS_START}:00–${SUPPORT_HOURS_END === 24 ? "midnight" : `${SUPPORT_HOURS_END}:00`} ${SUPPORT_TIMEZONE}). Use [[HANDOFF]] when the customer wants an agent and rules allow it.`;
+  }
+  return `Live customer support is OFF right now (outside ${SUPPORT_HOURS_START} AM–${SUPPORT_HOURS_END === 21 ? "9" : SUPPORT_HOURS_END} PM ${SUPPORT_TIMEZONE}). Do NOT use [[HANDOFF]]. If they want a person, say no agent is available at this hour, state live support is daily 9 AM–9 PM Philippine time, and offer to keep helping via AI or to message again during support hours.`;
 }
 
 /** Facebook Page ID — used to detect admin messages when is_echo is missing */
@@ -180,6 +209,11 @@ Holy Family Village 2, Governor Cuenco Avenue, Banilad, Cebu City (beside the gu
 HOURS:
 Monday to Friday, 9:00 AM to 6:00 PM. Closed Saturdays and Sundays.
 
+CUSTOMER SUPPORT (live agent handoff on Messenger):
+- Live agents can take over chat daily from 9:00 AM to 9:00 PM Philippine time only.
+- Between 9:00 PM and 9:00 AM: do NOT use [[HANDOFF]]. Apologize that no agent is available at this hour, state support hours (9 AM–9 PM daily), and offer to keep helping via AI or ask them to message again during support hours.
+- If a Beantol admin replies from Business Suite at any time, the server pauses the bot until handoff is cleared — that is separate from customer-requested handoff.
+
 HOW TO ORDER:
 - Visit our shop
 - Message us here on Messenger for pickup orders
@@ -197,11 +231,12 @@ STEP 2 — Customer sends delivery details (address + name + phone, or enough to
   2) Confirm what you captured — bullet or lines for Name, Address, Contact number (repeat exactly what they sent; if something is missing, politely note what is still needed before arranging delivery)
   3) "I'll arrange your delivery with Maxim for you once your order is confirmed. The Maxim delivery fee is paid by you through the rider (separate from your coffee order)."
   4) Politely: payment for the coffee order must be settled first before we dispatch for delivery — ask them to send proof of payment in this chat after paying (offer GCash/UnionBank from PAYMENT FAQ if they have not paid yet).
-  5) Offer a human: "If you'd like to connect with our customer representative to finalize your order, reply YES — or tell me you'd like to chat with an agent, a team member, or a real live person."
+  5) Only during live support hours (9 AM–9 PM Philippine time): offer a human — "If you'd like to connect with our customer representative to finalize your order, reply YES — or tell me you'd like to chat with an agent, a team member, or a real live person." Outside 9 PM–9 AM, skip this offer and say they can message again during 9 AM–9 PM for a live agent, but you can keep helping via AI now.
 - Step 2 may be longer (up to ~8 short sentences). Still plain text, no buttons.
 
 STEP 3 — After step 2, if they reply YES (or oo / yes po), or clearly want an agent / representative / real person / live person / staff to help:
-- Respond with exactly [[HANDOFF]] and nothing else (server connects them to the team).
+- During live support hours (9 AM–9 PM Philippine time): respond with exactly [[HANDOFF]] and nothing else.
+- Outside those hours: do NOT use [[HANDOFF]]; use the after-hours support message (no agent now, hours 9 AM–9 PM, offer AI help or wait).
 
 - Do NOT use [[HANDOFF]] for step 1 or step 2 alone — only when they accept the representative offer in step 3.
 - Never say "call me", "call us", "message us on Messenger", or suggest buttons/CTAs. Plain text only in this thread.
@@ -299,7 +334,7 @@ RULES:
 - Tone: friendly, warm, professional.
 - LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used unless the server says they requested Bisaya/Cebuano or Tagalog replies. Examples: "Naa mo?" / "Open pa?" → English. "Puede ka mag bisaya?" / "Bisaya lang" → Cebuano/Bisaya (NOT handoff).
 - LANGUAGE CHANGE IS NOT HANDOFF: Switching language is not handoff. Examples: "puede ka mag bisaya" → Bisaya; "English balik bi" / "balik english" / "English please" → English again. Never use [[HANDOFF]] for language switches.
-- HUMAN HANDOFF: When they want a real person, agent, staff, or customer representative — or reply YES (or oo / yes po) after you offered a representative following delivery details — respond with exactly [[HANDOFF]] and nothing else. The server sends the handoff message and pauses the bot.
+- HUMAN HANDOFF: When they want a real person, agent, staff, or customer representative — or reply YES (or oo / yes po) after you offered a representative following delivery details — use [[HANDOFF]] only during live support hours (9 AM–9 PM Philippine time). Outside those hours, never use [[HANDOFF]]; use the after-hours support message instead. The server sends the handoff message and pauses the bot when [[HANDOFF]] is allowed.
 - If you do not know something (custom orders, stock today), say you are not sure and ask them to leave details in chat or ask for a team member. Do not suggest calling or Messenger buttons. Use [[HANDOFF]] for delivery only in DELIVERY step 3, not for initial delivery questions.
 - Do not invent products, prices, or policies not listed above.`;
 
@@ -696,6 +731,22 @@ async function triggerHandoff(senderId, userText, source) {
   });
 }
 
+/** Customer-requested handoff only — blocked outside live support hours. */
+async function attemptCustomerHandoff(senderId, userText, source) {
+  if (!isWithinLiveSupportHours()) {
+    console.log(
+      `Customer handoff blocked for ${senderId} (${source}) — outside support hours (${SUPPORT_HOURS_START}:00–${SUPPORT_HOURS_END}:00 ${SUPPORT_TIMEZONE}).`
+    );
+    await sendMessage(senderId, AFTER_HOURS_HANDOFF_REPLY);
+    if (openai) {
+      appendChatHistory(senderId, userText, AFTER_HOURS_HANDOFF_REPLY);
+    }
+    return false;
+  }
+  await triggerHandoff(senderId, userText, source);
+  return true;
+}
+
 function getMailTransporter() {
   if (!isSmtpConfigured()) return null;
   if (!mailTransporter) {
@@ -1071,7 +1122,7 @@ async function handleMessage(senderId, userText) {
   updateReplyLanguagePreference(senderId, userText);
 
   if (wantsHumanHandoff(userText, senderId)) {
-    await triggerHandoff(senderId, userText, "phrase match");
+    await attemptCustomerHandoff(senderId, userText, "phrase match");
     return;
   }
 
@@ -1087,6 +1138,7 @@ async function handleMessage(senderId, userText) {
         model: OPENAI_MODEL,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: getSupportHoursSystemNote() },
           { role: "system", content: getReplyLanguageInstruction(senderId) },
           ...history,
           { role: "user", content: userText },
@@ -1110,7 +1162,9 @@ async function handleMessage(senderId, userText) {
       !isDeliveryAgentOfferPending(senderId);
     if (!blockHandoff) {
       clearDeliveryAgentOfferPending(senderId);
-      await triggerHandoff(senderId, userText, "AI [[HANDOFF]] marker");
+      if (!(await attemptCustomerHandoff(senderId, userText, "AI [[HANDOFF]] marker"))) {
+        return;
+      }
       return;
     }
   }
