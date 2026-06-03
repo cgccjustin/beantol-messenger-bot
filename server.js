@@ -32,6 +32,52 @@ const HANDOFF_REPLY =
 /** @type {Map<string, { handedOffAt: number, expiresAt: number, lastMessage: string }>} */
 const handoffSessions = new Map();
 
+/** @type {Map<string, 'en' | 'tl' | 'ceb'>} */
+const replyLanguagePrefs = new Map();
+
+function updateReplyLanguagePreference(senderId, userText) {
+  const t = userText.trim();
+  if (
+    /\b(?:reply|respond|answer|speak|write).*(?:in )?english\b/i.test(t) ||
+    /\benglish (?:only|please|na lang|pls)\b/i.test(t) ||
+    /\bswitch (?:back )?to english\b/i.test(t)
+  ) {
+    replyLanguagePrefs.set(senderId, "en");
+    return;
+  }
+  if (
+    /\b(?:reply|respond|answer|speak|write).*(?:in )?(?:tagalog|filipino)\b/i.test(t) ||
+    /\btagalog (?:only|please|na lang|pls|lang)\b/i.test(t) ||
+    /paki-?tagalog/i.test(t)
+  ) {
+    replyLanguagePrefs.set(senderId, "tl");
+    return;
+  }
+  if (
+    /\b(?:reply|respond|answer|speak|write).*(?:in )?(?:cebuano|bisaya)\b/i.test(t) ||
+    /\b(?:cebuano|bisaya) (?:only|please|na lang|pls|lang)\b/i.test(t) ||
+    /\bbisaya lang\b/i.test(t)
+  ) {
+    replyLanguagePrefs.set(senderId, "ceb");
+  }
+}
+
+function getReplyLanguageInstruction(senderId) {
+  const pref = replyLanguagePrefs.get(senderId) || "en";
+  if (pref === "tl") {
+    return "LANGUAGE FOR THIS REPLY: Write the entire message in Tagalog. Continue in Tagalog until the customer asks to switch back to English.";
+  }
+  if (pref === "ceb") {
+    return "LANGUAGE FOR THIS REPLY: Write the entire message in Cebuano/Bisaya. Continue in Cebuano until the customer asks to switch back to English.";
+  }
+  return (
+    "LANGUAGE FOR THIS REPLY: Write the entire message in English only. " +
+    "The customer may have written in Cebuano, Tagalog, or Bislish — you must still reply in English. " +
+    "Do not use Cebuano, Bisaya, or Tagalog in your reply (except proper nouns like Beantol). " +
+    "Do not mirror their language."
+  );
+}
+
 // Beantol Coffee Roasters — business knowledge for the AI
 const SYSTEM_PROMPT = `You are the friendly customer support assistant for Beantol Coffee Roasters on Facebook Messenger.
 
@@ -58,8 +104,7 @@ POPULAR PRODUCTS (prices in Philippine Pesos):
 RULES:
 - Keep replies short (2–4 sentences) unless the customer asks for more detail.
 - Tone: friendly, warm, professional.
-- LANGUAGE: Always reply in English by default — even if the customer writes in Cebuano, English, or a mix (Taglish/Bislish). Only reply in Tagalog or Cebuano when the customer explicitly asks for that language (e.g. "reply in Tagalog", "Cebuano please", "paki-Tagalog", "Bisaya lang"). Once they ask, keep using that language until they ask to switch back to English.
-- If the customer asks "Naa mo?" or "Open pa?" answer in English unless they have asked for Tagalog or Cebuano replies.
+- LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used. Writing in Cebuano, Tagalog, or Bislish does NOT mean you should reply in that language. Examples: "Naa mo?" / "Open pa?" / "Tagpila?" → answer in English. Only use Tagalog or Cebuano when the server says the customer explicitly requested that reply language.
 - HUMAN HANDOFF: If the customer wants a real person, agent, staff, or to chat with someone who is not the bot (any wording), respond with exactly [[HANDOFF]] and nothing else — no location, no prices, no "team member will reply" text. The server sends the real handoff message and pauses the bot.
 - If you do not know something (custom orders, stock today, wholesale pricing), say you are not sure and offer to connect them with a team member — they can ask for a person in their own words or leave their name and number.
 - Do not invent products, prices, or policies not listed above.`;
@@ -324,10 +369,12 @@ async function handleMessage(senderId, userText) {
       "Bot is running but OpenAI is not configured yet. Please add OPENAI_API_KEY.";
   } else {
     try {
+      updateReplyLanguagePreference(senderId, userText);
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: getReplyLanguageInstruction(senderId) },
           { role: "user", content: userText },
         ],
         max_tokens: 300,
