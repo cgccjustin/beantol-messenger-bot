@@ -1149,16 +1149,49 @@ function listActiveHandoffs() {
   return handoffs;
 }
 
+async function fetchPageInstagramStatus() {
+  if (!PAGE_ACCESS_TOKEN) {
+    return { error: "PAGE_ACCESS_TOKEN not set on server." };
+  }
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/v19.0/me?fields=id,name,instagram_business_account{id,username,name}&access_token=${PAGE_ACCESS_TOKEN}`
+    );
+    const data = await response.json();
+    if (!response.ok) {
+      return { error: data.error?.message || JSON.stringify(data) };
+    }
+    return {
+      page: { id: data.id, name: data.name },
+      instagram: data.instagram_business_account || null,
+      instagramLinked: Boolean(data.instagram_business_account?.id),
+    };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
 // --- Health check (useful after deploy) ---
 app.get("/", (req, res) => {
   res.send("Beantol bot is running (Facebook Messenger + Instagram DMs).");
 });
 
 // --- Admin: simple dashboard (bookmark on phone/PC) ---
-app.get("/admin", (req, res) => {
+app.get("/admin", async (req, res) => {
   if (!requireAdmin(req, res)) return;
 
   const handoffs = listActiveHandoffs();
+  const meta = await fetchPageInstagramStatus();
+  let metaHtml;
+  if (meta.error) {
+    metaHtml = `<p class="muted"><strong>Page / Instagram:</strong> ${escapeHtml(meta.error)}</p>`;
+  } else if (meta.instagramLinked) {
+    const ig = meta.instagram;
+    metaHtml = `<p class="muted"><strong>Page:</strong> ${escapeHtml(meta.page.name)} · <strong>Instagram:</strong> @${escapeHtml(ig.username || ig.name || ig.id)} (linked)</p>`;
+  } else {
+    metaHtml = `<p class="muted"><strong>Instagram:</strong> <em>not linked</em> to this Page token — link in Business Suite, then refresh PAGE_ACCESS_TOKEN on Render.</p>`;
+  }
+
   const rows = handoffs
     .map((h) => {
       const resumeUrl = buildResumeUrl(h.senderId, req, true);
@@ -1181,6 +1214,7 @@ th{background:#f5f5f5}a.button{display:inline-block;margin-top:16px;padding:10px
 .muted{color:#666;font-size:14px}
 </style></head><body>
 <h1>Beantol — paused chats</h1>
+${metaHtml}
 <p class="muted">Paused count: <strong>${handoffs.length}</strong>. Tap <strong>Resume AI</strong> to clear handoff and send the customer the “assistant is back” message.</p>
 <p class="muted"><strong>#bot</strong> in Business Suite usually does <em>not</em> reach this server — use this page or the email link instead.</p>
 ${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last note</th><th></th></tr>${rows}</table>` : "<p>No active handoffs.</p>"}
@@ -1217,6 +1251,20 @@ app.get("/admin/inventory", (req, res) => {
       alternative: p.alternative,
     })),
     hint: "Set UNAVAILABLE_PRODUCTS on Render (comma-separated). Save to redeploy. Remove a name to mark in stock again.",
+  });
+});
+
+app.get("/admin/meta-status", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const meta = await fetchPageInstagramStatus();
+  if (meta.error) {
+    return res.status(meta.error.includes("not set") ? 503 : 500).json({ error: meta.error });
+  }
+  res.json({
+    ...meta,
+    hint: meta.instagramLinked
+      ? "Instagram is linked to this Page token. Webhook must subscribe to this Instagram account for DMs."
+      : "No Instagram linked to this Page — link IG in Business Suite, then regenerate PAGE_ACCESS_TOKEN if needed.",
   });
 });
 
@@ -1312,26 +1360,77 @@ app.post("/webhook", (req, res) => {
   const body = req.body;
 
   if (!isSupportedWebhookObject(body.object)) {
+    console.log(
+      `Webhook ignored — unsupported object="${body?.object || "missing"}" (expected page or instagram).`
+    );
     return res.sendStatus(404);
   }
 
   // Respond immediately so Meta does not timeout
   res.sendStatus(200);
 
+  logWebhookReceipt(body);
+
   processWebhookEvents(body).catch((err) => {
     console.error("Webhook processing error:", err.message);
   });
 });
+
+function logWebhookReceipt(body) {
+  const events = collectMessagingEvents(body);
+  console.log(
+    `Webhook received object=${body.object} entries=${body.entry?.length || 0} events=${events.length}`
+  );
+  if (events.length === 0 && (body.entry?.length || 0) > 0) {
+    console.log(
+      "Webhook had entries but no messaging events — raw payload:",
+      JSON.stringify(body).slice(0, 1200)
+    );
+  }
+}
+
+function getInboundMessageText(event) {
+  if (event.postback?.payload) return String(event.postback.payload).trim();
+  if (event.postback?.title) return String(event.postback.title).trim();
+  const msg = event.message;
+  if (!msg) return "";
+  if (msg.is_deleted) return "";
+  if (msg.text) return String(msg.text).trim();
+  if (msg.quick_reply?.payload) return String(msg.quick_reply.payload).trim();
+  return "";
+}
 
 function collectMessagingEvents(body) {
   const platform = webhookPlatform(body);
   const items = [];
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
-      items.push({ event, channel: "messaging", platform });
+      items.push({ event, channel: "messaging", platform, entryId: entry.id });
     }
     for (const event of entry.standby || []) {
-      items.push({ event, channel: "standby", platform });
+      items.push({ event, channel: "standby", platform, entryId: entry.id });
+    }
+    for (const change of entry.changes || []) {
+      if (change.field !== "messages") continue;
+      const value = change.value;
+      if (!value) continue;
+      if (Array.isArray(value.messaging)) {
+        for (const event of value.messaging) {
+          items.push({
+            event,
+            channel: "changes.messaging",
+            platform,
+            entryId: entry.id,
+          });
+        }
+      } else if (value.sender?.id && (value.message || value.postback)) {
+        items.push({
+          event: value,
+          channel: "changes.messages",
+          platform,
+          entryId: entry.id,
+        });
+      }
     }
   }
   return items;
@@ -1345,15 +1444,22 @@ async function ensurePageIdLoaded() {
 async function processWebhookEvents(body) {
   await ensurePageIdLoaded();
 
-  for (const { event, channel, platform } of collectMessagingEvents(body)) {
-    if (!event.message) continue;
+  for (const { event, channel, platform, entryId } of collectMessagingEvents(body)) {
+    const text = getInboundMessageText(event);
+    const hasMessage = Boolean(event.message || event.postback);
+
+    if (!hasMessage) {
+      console.log(
+        `Webhook ${platform}/${channel}: skipped — no message/postback (entry=${entryId})`
+      );
+      continue;
+    }
 
     rememberPageIdFromEvent(event);
 
-    const text = event.message.text || "";
-    if (DEBUG_WEBHOOK || /#bot/i.test(text)) {
+    if (DEBUG_WEBHOOK || /#bot/i.test(text) || platform === "instagram") {
       console.log(
-        `Webhook ${platform}/${channel}: echo=${event.message.is_echo} sender=${event.sender?.id} recipient=${event.recipient?.id} pageId=${pageId} text=${JSON.stringify(text)}`
+        `Webhook ${platform}/${channel}: echo=${Boolean(event.message?.is_echo)} self=${Boolean(event.message?.is_self)} sender=${event.sender?.id} recipient=${event.recipient?.id} entry=${entryId} text=${JSON.stringify(text)}`
       );
     }
 
@@ -1362,12 +1468,29 @@ async function processWebhookEvents(body) {
       continue;
     }
 
-    if (!text) continue;
+    if (event.message?.is_self === true) {
+      console.log(
+        `Webhook ${platform}/${channel}: skipped is_self (Meta self-test ping to your IG account)`
+      );
+      continue;
+    }
+
+    if (!text) {
+      console.log(
+        `Webhook ${platform}/${channel}: skipped — empty text (attachment or unsupported media?)`
+      );
+      continue;
+    }
+
+    if (!event.sender?.id) {
+      console.log(`Webhook ${platform}/${channel}: skipped — missing sender.id`);
+      continue;
+    }
 
     try {
-      await handleMessage(event.sender.id, event.message.text, platform);
+      await handleMessage(event.sender.id, text, platform);
     } catch (err) {
-      console.error("Error handling message:", err.message);
+      console.error(`Error handling ${platform} message:`, err.message);
     }
   }
 }
@@ -1456,7 +1579,12 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     appendChatHistory(senderId, userText, reply);
   }
 
-  await sendMessage(senderId, sanitizeBotReply(reply));
+  try {
+    await sendMessage(senderId, sanitizeBotReply(reply));
+  } catch (err) {
+    console.error(`Send failed for ${senderId} (${platformLabel(platform)}):`, err.message);
+    throw err;
+  }
 }
 
 async function sendMessage(recipientId, text, options = {}) {
@@ -1482,7 +1610,10 @@ async function sendMessage(recipientId, text, options = {}) {
   const data = await response.json();
 
   if (!response.ok) {
-    console.error("Facebook Send API error:", JSON.stringify(data));
+    console.error(
+      `Meta Send API error (HTTP ${response.status}):`,
+      JSON.stringify(data)
+    );
     throw new Error(data.error?.message || "Failed to send message");
   }
 
