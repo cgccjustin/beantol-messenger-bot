@@ -34,6 +34,15 @@ const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
 const HANDOFF_REPLY =
   "Got it — I am connecting you with our team. A Beantol team member will reply to you personally here on Messenger as soon as they can. Please stay on this chat.";
 
+const BOT_RESUME_REPLY =
+  process.env.BOT_RESUME_REPLY ||
+  "Our chat assistant is back on — you can ask about coffee, prices, orders, or delivery anytime.";
+
+const ADMIN_RESUME_COMMANDS = (process.env.ADMIN_RESUME_COMMANDS || "#bot")
+  .split(",")
+  .map((cmd) => cmd.trim().toLowerCase())
+  .filter(Boolean);
+
 /** @type {Map<string, { handedOffAt: number, expiresAt: number, lastMessage: string }>} */
 const handoffSessions = new Map();
 
@@ -200,6 +209,9 @@ A: Customers can pay via GCash or UnionBank. Card payments are not available yet
 - GCash: 09176555008 (registered name: Justin Siao)
 - UnionBank account name: Reyna Mae Baldemor Epe | account number: 100660070137
 Share these when they ask how to pay. Remind them to send proof of payment in this chat after transferring.
+
+Q: Contact person? / Phone number? / Who do I call? / Number to reach?
+A: Justin Siao — 09176555008. Share when they ask for a contact person or phone number for Beantol.
 
 Q: Do you grind beans? / What grind sizes? / Pre-ground?
 A: Typically we do not grind beans, because different extraction methods (espresso, pour-over, drip, etc.) need different grind sizes. Beans are best calibrated to the customer's machine or brewing method. If they insist on a generic grind for drip coffee, it can be arranged subject to negotiation at purchase — mention that in chat.
@@ -378,19 +390,44 @@ function rememberBotMessageId(mid) {
 }
 
 /** Pause bot when a human admin replies from Business Suite (no extra customer message). */
+function isAdminResumeCommand(text) {
+  const normalized = text.trim().toLowerCase();
+  return ADMIN_RESUME_COMMANDS.some((cmd) => normalized === cmd);
+}
+
 function pauseBotForAdminTakeover(customerId) {
   if (getActiveHandoff(customerId)) return;
   startHandoff(customerId, "Admin replied from Business Suite");
   console.log(
-    `Bot paused for ${customerId} — admin message detected. Auto-replies off for ${HANDOFF_TIMEOUT_HOURS}h or until resolve.`
+    `Bot paused for ${customerId} — admin message detected. Auto-replies off for ${HANDOFF_TIMEOUT_HOURS}h or until admin sends resume command.`
   );
+}
+
+async function resumeBotForCustomer(customerId) {
+  const wasPaused = Boolean(getActiveHandoff(customerId));
+  resolveHandoff(customerId);
+  if (!wasPaused) {
+    console.log(`Resume command for ${customerId} — bot was already active.`);
+    return;
+  }
+  console.log(`Handoff cleared for ${customerId} — admin resume command.`);
+  await sendMessage(customerId, BOT_RESUME_REPLY);
 }
 
 function handlePageMessageEcho(event) {
   const customerId = event.recipient?.id;
   const mid = event.message?.mid;
+  const text = event.message?.text || "";
   if (!customerId || !mid) return;
   if (botSentMessageIds.has(mid)) return;
+
+  if (isAdminResumeCommand(text)) {
+    resumeBotForCustomer(customerId).catch((err) => {
+      console.error("Resume bot failed:", err.message);
+    });
+    return;
+  }
+
   pauseBotForAdminTakeover(customerId);
 }
 
