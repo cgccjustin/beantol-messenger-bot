@@ -45,6 +45,8 @@ const ADMIN_RESUME_COMMANDS = (process.env.ADMIN_RESUME_COMMANDS || "#bot")
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
 const DEBUG_WEBHOOK = process.env.DEBUG_WEBHOOK === "true";
 const PAGE_ID_ENV = process.env.PAGE_ID;
+const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
+const INSTAGRAM_USERNAME = process.env.INSTAGRAM_USERNAME;
 const SUPPORT_TIMEZONE = process.env.SUPPORT_TIMEZONE || "Asia/Manila";
 const SUPPORT_HOURS_START = Number(process.env.SUPPORT_HOURS_START || 9);
 const SUPPORT_HOURS_END = Number(process.env.SUPPORT_HOURS_END || 21);
@@ -1149,26 +1151,74 @@ function listActiveHandoffs() {
   return handoffs;
 }
 
+async function graphGet(path, accessToken = PAGE_ACCESS_TOKEN) {
+  const url = `https://graph.facebook.com/v19.0/${path}${path.includes("?") ? "&" : "?"}access_token=${accessToken}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  return { ok: response.ok, data };
+}
+
 async function fetchPageInstagramStatus() {
   if (!PAGE_ACCESS_TOKEN) {
     return { error: "PAGE_ACCESS_TOKEN not set on server." };
   }
-  try {
-    const response = await fetch(
-      `https://graph.facebook.com/v19.0/me?fields=id,name,instagram_business_account{id,username,name}&access_token=${PAGE_ACCESS_TOKEN}`
-    );
-    const data = await response.json();
-    if (!response.ok) {
-      return { error: data.error?.message || JSON.stringify(data) };
-    }
-    return {
-      page: { id: data.id, name: data.name },
-      instagram: data.instagram_business_account || null,
-      instagramLinked: Boolean(data.instagram_business_account?.id),
-    };
-  } catch (err) {
-    return { error: err.message };
+
+  const pageIdToTry = PAGE_ID_ENV || pageId;
+  const fieldQuery =
+    "fields=instagram_business_account{id,username,name},connected_instagram_account{id,username,name},name,id";
+
+  const attempts = [];
+  if (pageIdToTry) {
+    attempts.push({
+      label: `page ${pageIdToTry}`,
+      path: `${encodeURIComponent(pageIdToTry)}?${fieldQuery}`,
+    });
   }
+  attempts.push({ label: "me", path: `me?${fieldQuery}` });
+
+  for (const attempt of attempts) {
+    try {
+      const { ok, data } = await graphGet(attempt.path);
+      if (!ok) {
+        if (data.error?.code === 100) continue;
+        return { error: data.error?.message || JSON.stringify(data) };
+      }
+      const ig =
+        data.instagram_business_account || data.connected_instagram_account || null;
+      return {
+        page: { id: data.id, name: data.name },
+        instagram: ig,
+        instagramLinked: Boolean(ig?.id),
+        checkedVia: attempt.label,
+      };
+    } catch (err) {
+      continue;
+    }
+  }
+
+  if (INSTAGRAM_ACCOUNT_ID || INSTAGRAM_USERNAME) {
+    return {
+      page: pageIdToTry ? { id: pageIdToTry } : null,
+      instagram: {
+        id: INSTAGRAM_ACCOUNT_ID || undefined,
+        username: INSTAGRAM_USERNAME || undefined,
+      },
+      instagramLinked: true,
+      checkedVia: "env (INSTAGRAM_ACCOUNT_ID / INSTAGRAM_USERNAME)",
+      apiCheckUnavailable: true,
+      hint:
+        "Meta API lookup blocked (needs pages_read_engagement). Using env vars. IG DMs can still work if webhook is subscribed.",
+    };
+  }
+
+  return {
+    page: pageIdToTry ? { id: pageIdToTry } : null,
+    instagram: null,
+    instagramLinked: null,
+    apiCheckUnavailable: true,
+    hint:
+      "Cannot verify via Meta API without pages_read_engagement. Check Business Suite → Linked accounts. Optional on Render: PAGE_ID, INSTAGRAM_USERNAME. IG DMs still work if webhook + instagram_manage_messages are set up.",
+  };
 }
 
 // --- Health check (useful after deploy) ---
@@ -1185,11 +1235,14 @@ app.get("/admin", async (req, res) => {
   let metaHtml;
   if (meta.error) {
     metaHtml = `<p class="muted"><strong>Page / Instagram:</strong> ${escapeHtml(meta.error)}</p>`;
-  } else if (meta.instagramLinked) {
-    const ig = meta.instagram;
-    metaHtml = `<p class="muted"><strong>Page:</strong> ${escapeHtml(meta.page.name)} · <strong>Instagram:</strong> @${escapeHtml(ig.username || ig.name || ig.id)} (linked)</p>`;
-  } else {
+  } else if (meta.instagramLinked === true) {
+    const ig = meta.instagram || {};
+    const igLabel = ig.username ? `@${ig.username}` : ig.name || ig.id || "linked";
+    metaHtml = `<p class="muted"><strong>Page:</strong> ${escapeHtml(meta.page?.name || meta.page?.id || "—")} · <strong>Instagram:</strong> ${escapeHtml(igLabel)} (linked${meta.apiCheckUnavailable ? ", from env" : ""})</p>`;
+  } else if (meta.instagramLinked === false) {
     metaHtml = `<p class="muted"><strong>Instagram:</strong> <em>not linked</em> to this Page token — link in Business Suite, then refresh PAGE_ACCESS_TOKEN on Render.</p>`;
+  } else {
+    metaHtml = `<p class="muted"><strong>Instagram link:</strong> cannot verify via API (Meta needs pages_read_engagement). Check Business Suite → Linked accounts. ${escapeHtml(meta.hint || "")}</p>`;
   }
 
   const rows = handoffs
@@ -1262,9 +1315,13 @@ app.get("/admin/meta-status", async (req, res) => {
   }
   res.json({
     ...meta,
-    hint: meta.instagramLinked
-      ? "Instagram is linked to this Page token. Webhook must subscribe to this Instagram account for DMs."
-      : "No Instagram linked to this Page — link IG in Business Suite, then regenerate PAGE_ACCESS_TOKEN if needed.",
+    hint:
+      meta.hint ||
+      (meta.instagramLinked
+        ? "Instagram is linked to this Page token. Webhook must subscribe to this Instagram account for DMs."
+        : meta.instagramLinked === false
+          ? "No Instagram linked to this Page — link IG in Business Suite, then regenerate PAGE_ACCESS_TOKEN if needed."
+          : "API check inconclusive — verify in Business Suite."),
   });
 });
 
