@@ -55,6 +55,39 @@ const replyLanguagePrefs = new Map();
 /** @type {Map<string, number>} senderId -> alert cooldown expiresAt */
 const deliveryAlertCooldowns = new Map();
 
+const CHAT_HISTORY_MAX_MESSAGES = Number(
+  process.env.CHAT_HISTORY_MAX_MESSAGES || 20
+);
+const CHAT_HISTORY_TTL_MS =
+  Number(process.env.CHAT_HISTORY_TTL_HOURS || 24) * 60 * 60 * 1000;
+
+/** @type {Map<string, { messages: { role: "user" | "assistant"; content: string }[]; updatedAt: number }>} */
+const chatHistories = new Map();
+
+function getChatHistory(senderId) {
+  const entry = chatHistories.get(senderId);
+  if (!entry) return [];
+  if (Date.now() - entry.updatedAt > CHAT_HISTORY_TTL_MS) {
+    chatHistories.delete(senderId);
+    return [];
+  }
+  return entry.messages;
+}
+
+function appendChatHistory(senderId, userText, assistantReply) {
+  let entry = chatHistories.get(senderId);
+  if (!entry) {
+    entry = { messages: [], updatedAt: Date.now() };
+  }
+  entry.messages.push({ role: "user", content: userText });
+  entry.messages.push({ role: "assistant", content: assistantReply });
+  if (entry.messages.length > CHAT_HISTORY_MAX_MESSAGES) {
+    entry.messages = entry.messages.slice(-CHAT_HISTORY_MAX_MESSAGES);
+  }
+  entry.updatedAt = Date.now();
+  chatHistories.set(senderId, entry);
+}
+
 /** Facebook Page ID — used to detect admin messages when is_echo is missing */
 let pageId = null;
 
@@ -155,10 +188,12 @@ DELIVERY:
 - Never say "call me", "call us", "message us on Messenger", or suggest buttons/CTAs. Plain text only in this thread.
 - Do not invent delivery fees, zones, or timelines.
 
-PRICING (Philippine Pesos — do NOT list every product/size unless they ask for a full menu):
+PRICING (Philippine Pesos — do NOT dump the entire catalog unless they ask for a full menu):
 - Espresso roast and filter roast are different products — same origin name can have different prices.
 - Sizes: espresso has 250g, 500g, 1kg. Filter roast listed below is 250g (confirm 100g at shop if asked).
-- When asked "prices" generally: ask what bean they want and size (250g/500g/1kg), or espresso vs filter / pour-over. Give only the relevant line(s), not the full catalog.
+- When asked "prices" generally with NO specific bean named: ask which bean and whether espresso or filter / pour-over. Do not list every bean.
+- When they name a SPECIFIC bean and ask price / how much / tagpila for that bean: reply immediately with ALL retail sizes for that bean in one message (espresso: 250g, 500g, and 1kg with ₱ amounts; filter: 250g price). Do NOT ask which size (250g/500g/1kg) first.
+- WHOLESALE UPSELL: After retail prices for Beantol Prime, Brazil Santos, or Brazil Cerrado, add one short line that wholesale per-kg pricing is available for orders 6 kg and above (MOQ), with the wholesale ₱/kg from the table. Also mention wholesale when they ask about bulk, café supply, or large quantity. Do not upsell wholesale for Ethiopia Guji, Ethiopia Sidama, or filter roast (not available).
 
 ESPRESSO ROAST (available beans only):
 | Bean | 250g | 500g | 1kg | Wholesale per kg (MOQ 6kg) |
@@ -198,8 +233,8 @@ A: Visit the shop Monday–Friday 9 AM–6 PM, or message here on Messenger for 
 Q: Do you deliver? / Maxim?
 A: Yes, via Maxim. Delivery fee is paid by the customer. Ask them for complete address, contact name, and mobile number in chat.
 
-Q: How much is [product]? / Price list? / Tagpila?
-A: Do NOT dump the full price table. Ask which bean and size (250g, 500g, or 1kg) and whether they want espresso roast or filter roast if unclear. Then give only matching price(s) from PRICING above. Example: "Brazil Cerrado 1kg espresso is ₱1,550." For wholesale (6kg+), give per-kg wholesale only for Prime, Santos, or Cerrado.
+Q: How much is [product]? / Price list? / Tagpila? / How much for Beantol Prime?
+A: If they name one bean: give all retail sizes at once (e.g. Prime espresso — 250g ₱420, 500g ₱780, 1kg ₱1,450). If roast type unclear for a name that exists in both lists (e.g. Guji), ask espresso vs filter once, then give all sizes for that roast. If they ask generally with no bean: ask which bean and roast type. Never ask "which size?" when the bean is already clear. For Prime, Santos, or Cerrado, add the wholesale 6kg+ line when giving prices.
 
 Q: Espresso vs filter? / Pour-over prices?
 A: Explain these are separate roast styles with different prices. Filter roast beans are listed at 250g in PRICING; espresso has 250g, 500g, and 1kg.
@@ -208,7 +243,7 @@ Q: What do you recommend? / Best for espresso? / Pour-over?
 A: Espresso machine → suggest from ESPRESSO ROAST list. Pour-over/filter → suggest from FILTER ROAST list. Ask what they brew if unsure. Do not list all prices unless they ask for many items.
 
 Q: Tell me about [bean] / flavor notes / elevation / origin / process?
-A: If they name an espresso bean in ESPRESSO BEAN DETAILS, share only that bean's info (roast, origin, variety, process, elevation if known, flavor notes) in a short reply. Add price only if they also ask price or size. Do NOT list all five beans. If they ask about a discontinued or filter bean without details here, say you only have full specs for espresso roast beans listed above; for filter roast or others, visit the shop Mon–Fri or ask for a team member.
+A: Use conversation context: if they already discussed a bean and ask a follow-up without naming it again ("flavor notes?", "how about elevation?", "origin?"), answer for THAT same bean — do not ask which bean again. If they name an espresso bean in ESPRESSO BEAN DETAILS, share only that bean's info in a short reply (e.g. "Flavor notes for Beantol Prime: sweet chocolate, nutty, pistachio."). Add all retail prices only if they also ask price. Do NOT list all five beans. Filter beans without full specs: give 250g price and suggest shop Mon–Fri for more detail.
 
 Q: Payment methods? / GCash? / Card? / Bank? / Account number?
 A: Customers can pay via GCash or UnionBank. Card payments are not available yet.
@@ -238,8 +273,9 @@ Q: Kinsay crush ni Honey? / Who is Honey's crush?
 A: si Jesus! (Keep it short and playful — this is a light joke, not a serious support answer.)
 
 RULES:
-- PRICING: Never paste the entire PRICING section. Answer the specific bean + size + roast type they asked about (or ask one clarifying question first).
-- BEAN DETAILS: Never paste the entire ESPRESSO BEAN DETAILS section — only the one bean they asked about.
+- CONVERSATION CONTEXT: You receive recent messages in this Messenger thread. Remember which bean, roast type, and topic you were discussing. Follow-ups without a bean name still refer to that bean unless the customer clearly switches to another product.
+- PRICING: Never paste the entire PRICING section. For a named bean, give all sizes at once; only ask clarifying questions when the bean or espresso vs filter is genuinely unclear. Mention wholesale (6kg+, MOQ) for Prime, Santos, or Cerrado when quoting their retail prices or when bulk comes up.
+- BEAN DETAILS: Never paste the entire ESPRESSO BEAN DETAILS section — only the bean in context (named now or discussed earlier in the thread).
 - Keep replies short (2–4 sentences) unless the customer asks for more detail.
 - Tone: friendly, warm, professional.
 - LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used unless the server says they requested Bisaya/Cebuano or Tagalog replies. Examples: "Naa mo?" / "Open pa?" → English. "Puede ka mag bisaya?" / "Bisaya lang" → Cebuano/Bisaya (NOT handoff).
@@ -935,14 +971,16 @@ async function handleMessage(senderId, userText) {
       "Bot is running but OpenAI is not configured yet. Please add OPENAI_API_KEY.";
   } else {
     try {
+      const history = getChatHistory(senderId);
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "system", content: getReplyLanguageInstruction(senderId) },
+          ...history,
           { role: "user", content: userText },
         ],
-        max_tokens: 300,
+        max_tokens: 400,
       });
       reply =
         completion.choices[0]?.message?.content?.trim() ||
@@ -973,6 +1011,10 @@ async function handleMessage(senderId, userText) {
   if (deliveryTrigger) {
     console.log(`Delivery inquiry detected for ${senderId} (${deliveryTrigger}).`);
     await notifyDeliveryByEmail(senderId, userText, deliveryTrigger);
+  }
+
+  if (openai) {
+    appendChatHistory(senderId, userText, reply);
   }
 
   await sendMessage(senderId, sanitizeBotReply(reply));
