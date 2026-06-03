@@ -35,6 +35,10 @@ const handoffSessions = new Map();
 /** @type {Map<string, 'en' | 'tl' | 'ceb'>} */
 const replyLanguagePrefs = new Map();
 
+/** Message IDs sent by this bot — used to ignore echoes of our own replies */
+const botSentMessageIds = new Set();
+const BOT_MID_MAX = 500;
+
 function updateReplyLanguagePreference(senderId, userText) {
   const t = userText.trim();
   if (
@@ -92,8 +96,13 @@ Open daily, 9:00 AM to 6:00 PM.
 
 HOW TO ORDER:
 - Visit our shop
-- Delivery via Maxim
 - Message us here on Messenger for pickup orders
+
+DELIVERY:
+- Delivery is arranged via Maxim (third-party rider app).
+- The delivery fee is shouldered by the customer (not included in the coffee price unless you state otherwise).
+- When a customer asks about delivery, wants delivery, or orders for delivery: briefly confirm Maxim delivery and that the customer pays the delivery fee, then ask for (1) complete delivery address, (2) contact name, and (3) mobile/contact number. Keep it friendly and in one short reply.
+- Do not invent delivery fees, zones, or timelines. If details are unclear, offer to connect them with a team member.
 
 POPULAR PRODUCTS (prices in Philippine Pesos):
 - Beantol Prime — ₱1,450
@@ -192,6 +201,32 @@ function startHandoff(senderId, userText) {
 
 function resolveHandoff(senderId) {
   return handoffSessions.delete(senderId);
+}
+
+function rememberBotMessageId(mid) {
+  if (!mid) return;
+  botSentMessageIds.add(mid);
+  if (botSentMessageIds.size > BOT_MID_MAX) {
+    const oldest = botSentMessageIds.values().next().value;
+    botSentMessageIds.delete(oldest);
+  }
+}
+
+/** Pause bot when a human admin replies from Business Suite (no extra customer message). */
+function pauseBotForAdminTakeover(customerId) {
+  if (getActiveHandoff(customerId)) return;
+  startHandoff(customerId, "Admin replied from Business Suite");
+  console.log(
+    `Bot paused for ${customerId} — admin message detected. Auto-replies off for ${HANDOFF_TIMEOUT_HOURS}h or until resolve.`
+  );
+}
+
+function handlePageMessageEcho(event) {
+  const customerId = event.recipient?.id;
+  const mid = event.message?.mid;
+  if (!customerId || !mid) return;
+  if (botSentMessageIds.has(mid)) return;
+  pauseBotForAdminTakeover(customerId);
 }
 
 let mailTransporter = null;
@@ -339,11 +374,16 @@ app.post("/webhook", (req, res) => {
 
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
-      if (event.message && event.message.text && !event.message.is_echo) {
-        handleMessage(event.sender.id, event.message.text).catch((err) => {
-          console.error("Error handling message:", err.message);
-        });
+      if (!event.message?.text) continue;
+
+      if (event.message.is_echo) {
+        handlePageMessageEcho(event);
+        continue;
       }
+
+      handleMessage(event.sender.id, event.message.text).catch((err) => {
+        console.error("Error handling message:", err.message);
+      });
     }
   }
 });
@@ -416,6 +456,7 @@ async function sendMessage(recipientId, text) {
     throw new Error(data.error?.message || "Failed to send message");
   }
 
+  rememberBotMessageId(data.message_id);
   console.log(`Reply sent to ${recipientId}`);
 }
 
