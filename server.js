@@ -5,6 +5,7 @@
 
 require("dotenv").config();
 const express = require("express");
+const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 
 const app = express();
@@ -15,6 +16,21 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
+const HANDOFF_TIMEOUT_HOURS = Number(process.env.HANDOFF_TIMEOUT_HOURS || 24);
+const HANDOFF_NOTIFY_EMAIL =
+  process.env.HANDOFF_NOTIFY_EMAIL || "cgccjustin@gmail.com";
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+
+const HANDOFF_REPLY =
+  "Got it — I am connecting you with our team. A Beantol team member will reply to you personally here on Messenger as soon as they can. Please stay on this chat.";
+
+/** @type {Map<string, { handedOffAt: number, expiresAt: number, lastMessage: string }>} */
+const handoffSessions = new Map();
 
 // Beantol Coffee Roasters — business knowledge for the AI
 const SYSTEM_PROMPT = `You are the friendly customer support assistant for Beantol Coffee Roasters on Facebook Messenger.
@@ -41,20 +57,213 @@ POPULAR PRODUCTS (prices in Philippine Pesos):
 
 RULES:
 - Keep replies short (2–4 sentences) unless the customer asks for more detail.
-- Tone: friendly, warm, professional. Taglish is OK when it feels natural.
-- LANGUAGE: Reply in the same language the customer uses. If they write in Tagalog, reply in Tagalog. If they write in Cebuano/Bisaya, reply in Cebuano. If they mix (Taglish/Bislish), you may mix too. Default to English only when the customer writes in English.
-- If the customer asks "Naa mo?" or "Open pa?" answer naturally in Cebuano/Tagalog as appropriate.
-- If the customer types "HUMAN" or needs a person, say a team member will reply personally soon.
-- If you do not know something (custom orders, stock today, wholesale pricing), say you are not sure and ask them to type HUMAN or leave their name and number.
+- Tone: friendly, warm, professional.
+- LANGUAGE: Always reply in English by default — even if the customer writes in Cebuano, English, or a mix (Taglish/Bislish). Only reply in Tagalog or Cebuano when the customer explicitly asks for that language (e.g. "reply in Tagalog", "Cebuano please", "paki-Tagalog", "Bisaya lang"). Once they ask, keep using that language until they ask to switch back to English.
+- If the customer asks "Naa mo?" or "Open pa?" answer in English unless they have asked for Tagalog or Cebuano replies.
+- HUMAN HANDOFF: If the customer wants a real person, agent, staff, or to chat with someone who is not the bot (any wording), respond with exactly [[HANDOFF]] and nothing else — no location, no prices, no "team member will reply" text. The server sends the real handoff message and pauses the bot.
+- If you do not know something (custom orders, stock today, wholesale pricing), say you are not sure and offer to connect them with a team member — they can ask for a person in their own words or leave their name and number.
 - Do not invent products, prices, or policies not listed above.`;
 
 const openai = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY })
   : null;
 
+const HANDOFF_MARKER = "[[HANDOFF]]";
+
+const HANDOFF_PATTERNS = [
+  /\bhuman\b/i,
+  /\breal person\b/i,
+  /\blive person\b/i,
+  /\blocal person\b/i,
+  /\btalk to (?:a )?(?:person|human|agent|staff|someone|representative)\b/i,
+  /\bchat with (?:a )?(?:person|human|agent|staff|someone|representative)\b/i,
+  /\bchat with (?:a )?(?:real|live) (?:person|human)\b/i,
+  /\bspeak to (?:a )?(?:person|human|agent|staff|someone|representative)\b/i,
+  /\b(?:need|want|get) (?:an? )?(?:agent|person|human|staff|someone|representative)\b/i,
+  /\b(?:i )?need agent\b/i,
+  /\bagent (?:to )?chat\b/i,
+  /\bnot (?:an? )?ai\b/i,
+  /\bno ai\b/i,
+  /\bis anyone (?:available|there|online)\b/i,
+  /\bcustomer service\b/i,
+  /\bagent please\b/i,
+  /\brepresentative\b/i,
+  /\bconnect me (?:to|with)\b/i,
+  /\bmay tao\b/i,
+  /\bpwede.*(?:staff|tao|person|agent)\b/i,
+  /\btawag.*staff\b/i,
+  /\bchat in person\b/i,
+  /\bavailable to chat\b/i,
+  /\bteam member\b/i,
+  /\bactual (?:person|human)\b/i,
+];
+
+const HANDOFF_INTENT_WORDS =
+  /\b(need|want|get|talk|chat|speak|connect|call|ask|looking for|hanap|gusto|pwede|please|help)\b/i;
+const HANDOFF_TARGET_WORDS =
+  /\b(agent|human|person|people|staff|someone|representative|tao|employee|team member|real person|live person|operator)\b/i;
+
+function wantsHumanHandoff(text) {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  if (HANDOFF_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
+  return (
+    HANDOFF_INTENT_WORDS.test(normalized) && HANDOFF_TARGET_WORDS.test(normalized)
+  );
+}
+
+function isAiHandoffReply(reply) {
+  return Boolean(reply && reply.includes(HANDOFF_MARKER));
+}
+
+function isSmtpConfigured() {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return false;
+  const pass = SMTP_PASS.trim();
+  if (pass.length < 10) return false;
+  if (/REPLACE|your_|changeme|example/i.test(pass)) return false;
+  return true;
+}
+
+function getActiveHandoff(senderId) {
+  const session = handoffSessions.get(senderId);
+  if (!session) return null;
+
+  if (Date.now() > session.expiresAt) {
+    handoffSessions.delete(senderId);
+    return null;
+  }
+
+  return session;
+}
+
+function startHandoff(senderId, userText) {
+  const now = Date.now();
+  handoffSessions.set(senderId, {
+    handedOffAt: now,
+    expiresAt: now + HANDOFF_TIMEOUT_HOURS * 60 * 60 * 1000,
+    lastMessage: userText.trim(),
+  });
+}
+
+function resolveHandoff(senderId) {
+  return handoffSessions.delete(senderId);
+}
+
+let mailTransporter = null;
+
+async function triggerHandoff(senderId, userText, source) {
+  startHandoff(senderId, userText);
+  console.log(
+    `Human handoff started for ${senderId} (${source}). Auto-replies paused for ${HANDOFF_TIMEOUT_HOURS}h or until admin resolves.`
+  );
+  await sendMessage(senderId, HANDOFF_REPLY);
+  notifyHandoffByEmail(senderId, userText).catch((err) => {
+    console.error("Handoff email failed:", err.message);
+  });
+}
+
+function getMailTransporter() {
+  if (!isSmtpConfigured()) return null;
+  if (!mailTransporter) {
+    mailTransporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_PORT === 465,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    });
+  }
+  return mailTransporter;
+}
+
+async function notifyHandoffByEmail(senderId, userText) {
+  const transporter = getMailTransporter();
+  if (!transporter) {
+    console.warn("Handoff email skipped — set SMTP_HOST, SMTP_USER, and SMTP_PASS in .env");
+    return;
+  }
+
+  const handedOffAt = new Date().toISOString();
+  const resolveHint = ADMIN_SECRET
+    ? `Mark handled (resume bot): POST /admin/handoffs/${senderId}/resolve?token=YOUR_ADMIN_SECRET`
+    : "Mark handled via POST /admin/handoffs/:senderId/resolve when ADMIN_SECRET is set.";
+
+  await transporter.sendMail({
+    from: SMTP_FROM,
+    to: HANDOFF_NOTIFY_EMAIL,
+    subject: "Beantol Messenger — customer wants a human",
+    text: [
+      "A customer asked to speak with a real person on Messenger.",
+      "",
+      `Time: ${handedOffAt}`,
+      `Sender ID: ${senderId}`,
+      `Their message: ${userText}`,
+      "",
+      "Bot auto-replies are paused for this customer. Reply in Meta Business Suite / Messenger.",
+      "",
+      resolveHint,
+    ].join("\n"),
+  });
+
+  console.log(`Handoff email sent to ${HANDOFF_NOTIFY_EMAIL}`);
+}
+
+function requireAdmin(req, res) {
+  if (!ADMIN_SECRET) {
+    res.status(503).json({ error: "ADMIN_SECRET is not configured on the server." });
+    return false;
+  }
+
+  const token = req.query.token || req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  if (token !== ADMIN_SECRET) {
+    res.status(401).json({ error: "Unauthorized." });
+    return false;
+  }
+
+  return true;
+}
+
 // --- Health check (useful after deploy) ---
 app.get("/", (req, res) => {
   res.send("Beantol Messenger bot is running.");
+});
+
+// --- Admin: list conversations waiting for a human ---
+app.get("/admin/handoffs", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const now = Date.now();
+  const handoffs = [];
+
+  for (const [senderId, session] of handoffSessions.entries()) {
+    if (now > session.expiresAt) {
+      handoffSessions.delete(senderId);
+      continue;
+    }
+
+    handoffs.push({
+      senderId,
+      handedOffAt: new Date(session.handedOffAt).toISOString(),
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      lastMessage: session.lastMessage,
+    });
+  }
+
+  res.json({ count: handoffs.length, handoffs });
+});
+
+// --- Admin: mark a conversation handled (bot can auto-reply again) ---
+app.post("/admin/handoffs/:senderId/resolve", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const { senderId } = req.params;
+  const removed = resolveHandoff(senderId);
+
+  if (!removed) {
+    return res.status(404).json({ error: "No active handoff for this sender." });
+  }
+
+  console.log(`Handoff resolved for ${senderId} by admin.`);
+  res.json({ ok: true, senderId, message: "Handoff cleared. Bot will auto-reply again." });
 });
 
 // --- Step 5: Facebook verifies your webhook with a GET request ---
@@ -97,6 +306,17 @@ app.post("/webhook", (req, res) => {
 async function handleMessage(senderId, userText) {
   console.log(`Message from ${senderId}: ${userText}`);
 
+  const activeHandoff = getActiveHandoff(senderId);
+  if (activeHandoff) {
+    console.log(`Skipping auto-reply for ${senderId} — waiting for human (expires ${new Date(activeHandoff.expiresAt).toISOString()}).`);
+    return;
+  }
+
+  if (wantsHumanHandoff(userText)) {
+    await triggerHandoff(senderId, userText, "phrase match");
+    return;
+  }
+
   let reply;
 
   if (!openai) {
@@ -120,6 +340,11 @@ async function handleMessage(senderId, userText) {
       reply =
         "Sorry, I am having trouble right now. Please try again in a moment.";
     }
+  }
+
+  if (isAiHandoffReply(reply)) {
+    await triggerHandoff(senderId, userText, "AI [[HANDOFF]] marker");
+    return;
   }
 
   await sendMessage(senderId, reply);
@@ -153,13 +378,29 @@ function checkConfig() {
   if (!VERIFY_TOKEN) missing.push("VERIFY_TOKEN");
   if (!PAGE_ACCESS_TOKEN) missing.push("PAGE_ACCESS_TOKEN");
   if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY (bot will send a placeholder reply)");
+  if (!ADMIN_SECRET) missing.push("ADMIN_SECRET (admin handoff endpoints disabled)");
+  if (!isSmtpConfigured()) {
+    missing.push("SMTP_HOST / SMTP_USER / SMTP_PASS (handoff emails disabled or placeholder)");
+  }
 
   if (missing.length) {
     console.warn("Missing env vars:", missing.join(", "));
   }
 }
 
+async function verifySmtpOnStartup() {
+  const transporter = getMailTransporter();
+  if (!transporter) return;
+  try {
+    await transporter.verify();
+    console.log(`SMTP ready — handoff emails will go to ${HANDOFF_NOTIFY_EMAIL}`);
+  } catch (err) {
+    console.error("SMTP verify failed (handoff emails will not send):", err.message);
+  }
+}
+
 checkConfig();
+verifySmtpOnStartup().catch(() => {});
 
 app.listen(PORT, () => {
   console.log(`Beantol bot listening on port ${PORT}`);
