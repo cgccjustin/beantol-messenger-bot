@@ -52,6 +52,9 @@ const replyLanguagePrefs = new Map();
 /** @type {Map<string, number>} senderId -> alert cooldown expiresAt */
 const deliveryAlertCooldowns = new Map();
 
+/** Facebook Page ID — used to detect admin messages when is_echo is missing */
+let pageId = null;
+
 /** Message IDs sent by this bot — used to ignore echoes of our own replies */
 const botSentMessageIds = new Set();
 const BOT_MID_MAX = 500;
@@ -402,8 +405,16 @@ function isAdminResumeCommand(text) {
   if (!normalized) return false;
   return ADMIN_RESUME_COMMANDS.some((cmd) => {
     const target = normalizeCommandText(cmd);
-    return normalized === target;
+    return normalized === target || normalized.includes(target);
   });
+}
+
+function isOutboundFromPage(event) {
+  if (event.message?.is_echo === true) return true;
+  if (pageId && event.sender?.id && String(event.sender.id) === String(pageId)) {
+    return true;
+  }
+  return false;
 }
 
 /** Pause bot when a human admin replies from Business Suite (no extra customer message). */
@@ -437,15 +448,24 @@ async function resumeBotForCustomer(customerId, adminText) {
   }
 }
 
-async function handlePageMessageEcho(event) {
+async function handlePageOutbound(event) {
+  if (!isOutboundFromPage(event)) return;
+
   const customerId = event.recipient?.id;
   const mid = event.message?.mid;
   const text = event.message?.text || "";
-  if (!customerId || !mid) return;
+  if (!customerId || !mid) {
+    console.log("Page outbound missing customerId or mid:", JSON.stringify(event).slice(0, 400));
+    return;
+  }
+  if (String(customerId) === String(pageId)) {
+    console.log("Page outbound skipped — recipient is page, not customer.");
+    return;
+  }
   if (botSentMessageIds.has(mid)) return;
 
   console.log(
-    `Page echo to ${customerId}: text=${JSON.stringify(text)} resume=${isAdminResumeCommand(text)}`
+    `Page outbound → customer ${customerId}: echo=${Boolean(event.message?.is_echo)} text=${JSON.stringify(text)} resume=${isAdminResumeCommand(text)}`
   );
 
   if (isAdminResumeCommand(text)) {
@@ -686,8 +706,7 @@ app.get("/admin/test-email", async (req, res) => {
   }
 });
 
-// --- Admin: mark a conversation handled (bot can auto-reply again) ---
-app.post("/admin/handoffs/:senderId/resolve", (req, res) => {
+async function resolveHandoffHandler(req, res) {
   if (!requireAdmin(req, res)) return;
 
   const { senderId } = req.params;
@@ -697,9 +716,27 @@ app.post("/admin/handoffs/:senderId/resolve", (req, res) => {
     return res.status(404).json({ error: "No active handoff for this sender." });
   }
 
-  console.log(`Handoff resolved for ${senderId} by admin.`);
-  res.json({ ok: true, senderId, message: "Handoff cleared. Bot will auto-reply again." });
-});
+  console.log(`Handoff resolved for ${senderId} by admin API.`);
+
+  if (req.query.sendResume === "1") {
+    try {
+      await sendMessageWithFallback(senderId, BOT_RESUME_REPLY);
+    } catch (err) {
+      console.error(`Resolve sendResume failed for ${senderId}:`, err.message);
+    }
+  }
+
+  res.json({
+    ok: true,
+    senderId,
+    message: "Handoff cleared. Bot will auto-reply again.",
+    resumeMessageSent: req.query.sendResume === "1",
+  });
+}
+
+// --- Admin: clear handoff (POST or GET — open GET link in browser) ---
+app.post("/admin/handoffs/:senderId/resolve", resolveHandoffHandler);
+app.get("/admin/handoffs/:senderId/resolve", resolveHandoffHandler);
 
 // --- Step 5: Facebook verifies your webhook with a GET request ---
 app.get("/webhook", (req, res) => {
@@ -737,8 +774,8 @@ async function processWebhookEvents(body) {
     for (const event of entry.messaging || []) {
       if (!event.message) continue;
 
-      if (event.message.is_echo) {
-        await handlePageMessageEcho(event);
+      if (isOutboundFromPage(event)) {
+        await handlePageOutbound(event);
         continue;
       }
 
@@ -915,8 +952,27 @@ async function verifyEmailOnStartup() {
   }
 }
 
+async function loadPageId() {
+  if (!PAGE_ACCESS_TOKEN) return;
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/v19.0/me?fields=id&access_token=${PAGE_ACCESS_TOKEN}`
+    );
+    const data = await response.json();
+    if (data.id) {
+      pageId = String(data.id);
+      console.log(`Page ID loaded for outbound detection: ${pageId}`);
+    } else {
+      console.warn("Could not load Page ID:", JSON.stringify(data));
+    }
+  } catch (err) {
+    console.warn("loadPageId failed:", err.message);
+  }
+}
+
 checkConfig();
 verifyEmailOnStartup().catch(() => {});
+loadPageId().catch(() => {});
 
 app.listen(PORT, () => {
   console.log(`Beantol bot listening on port ${PORT}`);
