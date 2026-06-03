@@ -20,6 +20,8 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const HANDOFF_TIMEOUT_HOURS = Number(process.env.HANDOFF_TIMEOUT_HOURS || 24);
 const HANDOFF_NOTIFY_EMAIL =
   process.env.HANDOFF_NOTIFY_EMAIL || "cgccjustin@gmail.com";
+const DELIVERY_ALERT_COOLDOWN_MS =
+  Number(process.env.DELIVERY_ALERT_COOLDOWN_MINUTES || 240) * 60 * 1000;
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
 const SMTP_USER = process.env.SMTP_USER;
@@ -37,7 +39,6 @@ const replyLanguagePrefs = new Map();
 
 /** @type {Map<string, number>} senderId -> alert cooldown expiresAt */
 const deliveryAlertCooldowns = new Map();
-const DELIVERY_ALERT_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
 /** Message IDs sent by this bot — used to ignore echoes of our own replies */
 const botSentMessageIds = new Set();
@@ -193,7 +194,21 @@ const HANDOFF_TARGET_WORDS =
 function isDeliveryInquiry(text) {
   const t = text.trim();
   if (!t) return false;
-  return /\b(?:delivery|deliver|padala|hatod|shipping|ship|maxim)\b/i.test(t);
+  return (
+    /\b(?:delivery|deliver|deliveries|padala|hatod|shipping|ship|maxim)\b/i.test(t) ||
+    /\b(?:pwede|puede|gusto|can i|can you).*(?:deliver|hatod|padala|maxim)\b/i.test(t) ||
+    /\border.*(?:deliver|hatod|padala|maxim)\b/i.test(t) ||
+    /\b(?:deliver|hatod|padala|maxim).*(?:order|coffee|beans)\b/i.test(t)
+  );
+}
+
+function aiReplyIsDeliveryFlow(reply) {
+  const r = (reply || "").trim();
+  if (!r) return false;
+  return (
+    /\bmaxim\b/i.test(r) &&
+    /\b(?:address|contact name|phone|mobile|contact number)\b/i.test(r)
+  );
 }
 
 function wantsHumanHandoff(text) {
@@ -355,34 +370,50 @@ function markDeliveryAlertSent(senderId) {
   deliveryAlertCooldowns.set(senderId, Date.now() + DELIVERY_ALERT_COOLDOWN_MS);
 }
 
-async function notifyDeliveryByEmail(senderId, userText) {
-  if (!shouldSendDeliveryAlert(senderId)) return;
+async function notifyDeliveryByEmail(senderId, userText, source) {
+  if (!shouldSendDeliveryAlert(senderId)) {
+    console.log(
+      `Delivery alert skipped for ${senderId} (cooldown — already emailed recently).`
+    );
+    return false;
+  }
 
   const transporter = getMailTransporter();
   if (!transporter) {
-    console.warn("Delivery alert email skipped — SMTP not configured.");
-    return;
+    console.warn(
+      "Delivery alert email skipped — SMTP not configured on server (check Render Environment: SMTP_HOST, SMTP_USER, SMTP_PASS)."
+    );
+    return false;
   }
 
   const now = new Date().toISOString();
-  await transporter.sendMail({
-    from: SMTP_FROM,
-    to: HANDOFF_NOTIFY_EMAIL,
-    subject: "Beantol Messenger — Maxim delivery inquiry (bot still replying)",
-    text: [
-      "A customer asked about delivery on Messenger.",
-      "",
-      `Time: ${now}`,
-      `Sender ID: ${senderId}`,
-      `Their message: ${userText}`,
-      "",
-      "The bot is still auto-replying and collecting address, name, and phone in the chat.",
-      "Reply in Meta Business Suite when you take over — that will pause the bot for this customer.",
-    ].join("\n"),
-  });
+  try {
+    await transporter.sendMail({
+      from: SMTP_FROM,
+      to: HANDOFF_NOTIFY_EMAIL,
+      subject: "Beantol Messenger — Maxim delivery inquiry (bot still replying)",
+      text: [
+        "A customer asked about delivery on Messenger.",
+        "",
+        `Time: ${now}`,
+        `Trigger: ${source}`,
+        `Sender ID: ${senderId}`,
+        `Their message: ${userText}`,
+        "",
+        "The bot is still auto-replying and collecting address, name, and phone in the chat.",
+        "Reply in Meta Business Suite when you take over — that will pause the bot for this customer.",
+      ].join("\n"),
+    });
+  } catch (err) {
+    console.error("Delivery alert email failed:", err.message);
+    return false;
+  }
 
   markDeliveryAlertSent(senderId);
-  console.log(`Delivery alert email sent to ${HANDOFF_NOTIFY_EMAIL} for ${senderId}`);
+  console.log(
+    `Delivery alert email sent to ${HANDOFF_NOTIFY_EMAIL} for ${senderId} (${source}).`
+  );
+  return true;
 }
 
 function requireAdmin(req, res) {
@@ -427,6 +458,30 @@ app.get("/admin/handoffs", (req, res) => {
   }
 
   res.json({ count: handoffs.length, handoffs });
+});
+
+// --- Admin: send a test email (verify SMTP on Render) ---
+app.get("/admin/test-email", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const transporter = getMailTransporter();
+  if (!transporter) {
+    return res.status(503).json({
+      error: "SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS on Render.",
+    });
+  }
+
+  try {
+    await transporter.sendMail({
+      from: SMTP_FROM,
+      to: HANDOFF_NOTIFY_EMAIL,
+      subject: "Beantol Messenger — test email",
+      text: "If you received this, SMTP is working on your server.",
+    });
+    res.json({ ok: true, sentTo: HANDOFF_NOTIFY_EMAIL });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Admin: mark a conversation handled (bot can auto-reply again) ---
@@ -502,12 +557,6 @@ async function handleMessage(senderId, userText) {
     return;
   }
 
-  if (isDeliveryInquiry(userText)) {
-    notifyDeliveryByEmail(senderId, userText).catch((err) => {
-      console.error("Delivery alert email failed:", err.message);
-    });
-  }
-
   let reply;
 
   if (!openai) {
@@ -537,10 +586,22 @@ async function handleMessage(senderId, userText) {
   if (
     isAiHandoffReply(reply) &&
     !isReplyLanguagePreferenceRequest(userText) &&
-    !isDeliveryInquiry(userText)
+    !isDeliveryInquiry(userText) &&
+    !aiReplyIsDeliveryFlow(reply)
   ) {
     await triggerHandoff(senderId, userText, "AI [[HANDOFF]] marker");
     return;
+  }
+
+  const deliveryTrigger = isDeliveryInquiry(userText)
+    ? "customer message"
+    : aiReplyIsDeliveryFlow(reply)
+      ? "bot delivery reply"
+      : null;
+
+  if (deliveryTrigger) {
+    console.log(`Delivery inquiry detected for ${senderId} (${deliveryTrigger}).`);
+    await notifyDeliveryByEmail(senderId, userText, deliveryTrigger);
   }
 
   await sendMessage(senderId, sanitizeBotReply(reply));
@@ -590,7 +651,9 @@ async function verifySmtpOnStartup() {
   if (!transporter) return;
   try {
     await transporter.verify();
-    console.log(`SMTP ready — handoff emails will go to ${HANDOFF_NOTIFY_EMAIL}`);
+    console.log(
+      `SMTP ready — alerts go to ${HANDOFF_NOTIFY_EMAIL} (handoff + delivery)`
+    );
   } catch (err) {
     console.error("SMTP verify failed (handoff emails will not send):", err.message);
   }
