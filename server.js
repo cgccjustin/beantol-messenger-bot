@@ -389,26 +389,45 @@ function rememberBotMessageId(mid) {
   }
 }
 
-/** Pause bot when a human admin replies from Business Suite (no extra customer message). */
-function isAdminResumeCommand(text) {
-  const normalized = text.trim().toLowerCase();
-  return ADMIN_RESUME_COMMANDS.some((cmd) => normalized === cmd);
+function normalizeCommandText(text) {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
-function pauseBotForAdminTakeover(customerId) {
+/** True when an admin sent a resume command (e.g. #bot) from Business Suite. */
+function isAdminResumeCommand(text) {
+  const normalized = normalizeCommandText(text);
+  if (!normalized) return false;
+  return ADMIN_RESUME_COMMANDS.some((cmd) => {
+    const target = normalizeCommandText(cmd);
+    return normalized === target;
+  });
+}
+
+/** Pause bot when a human admin replies from Business Suite (no extra customer message). */
+function pauseBotForAdminTakeover(customerId, adminText) {
+  if (adminText && isAdminResumeCommand(adminText)) return;
   if (getActiveHandoff(customerId)) return;
   startHandoff(customerId, "Admin replied from Business Suite");
   console.log(
-    `Bot paused for ${customerId} — admin message detected. Auto-replies off for ${HANDOFF_TIMEOUT_HOURS}h or until admin sends resume command.`
+    `Bot paused for ${customerId} — admin message detected. Auto-replies off for ${HANDOFF_TIMEOUT_HOURS}h or until admin sends ${ADMIN_RESUME_COMMANDS[0]}.`
   );
 }
 
-async function resumeBotForCustomer(customerId) {
+const RESUME_SEND_DELAY_MS = Number(process.env.RESUME_SEND_DELAY_MS || 1200);
+
+async function resumeBotForCustomer(customerId, adminText) {
   const hadHandoff = Boolean(getActiveHandoff(customerId));
   resolveHandoff(customerId);
   console.log(
-    `Handoff cleared for ${customerId} via admin resume command (was paused: ${hadHandoff}).`
+    `Resume command "${adminText}" for ${customerId} — handoff cleared (was paused: ${hadHandoff}).`
   );
+
+  if (RESUME_SEND_DELAY_MS > 0) {
+    await new Promise((resolve) => setTimeout(resolve, RESUME_SEND_DELAY_MS));
+  }
 
   try {
     await sendMessageWithFallback(customerId, BOT_RESUME_REPLY);
@@ -418,21 +437,25 @@ async function resumeBotForCustomer(customerId) {
   }
 }
 
-function handlePageMessageEcho(event) {
+async function handlePageMessageEcho(event) {
   const customerId = event.recipient?.id;
   const mid = event.message?.mid;
   const text = event.message?.text || "";
   if (!customerId || !mid) return;
   if (botSentMessageIds.has(mid)) return;
 
+  console.log(
+    `Page echo to ${customerId}: text=${JSON.stringify(text)} resume=${isAdminResumeCommand(text)}`
+  );
+
   if (isAdminResumeCommand(text)) {
-    resumeBotForCustomer(customerId).catch((err) => {
-      console.error("Resume bot failed:", err.message);
-    });
+    await resumeBotForCustomer(customerId, text);
     return;
   }
 
-  pauseBotForAdminTakeover(customerId);
+  if (!text.trim()) return;
+
+  pauseBotForAdminTakeover(customerId, text);
 }
 
 let mailTransporter = null;
@@ -704,21 +727,31 @@ app.post("/webhook", (req, res) => {
   // Respond immediately so Facebook does not timeout
   res.sendStatus(200);
 
+  processWebhookEvents(body).catch((err) => {
+    console.error("Webhook processing error:", err.message);
+  });
+});
+
+async function processWebhookEvents(body) {
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
-      if (!event.message?.text) continue;
+      if (!event.message) continue;
 
       if (event.message.is_echo) {
-        handlePageMessageEcho(event);
+        await handlePageMessageEcho(event);
         continue;
       }
 
-      handleMessage(event.sender.id, event.message.text).catch((err) => {
+      if (!event.message.text) continue;
+
+      try {
+        await handleMessage(event.sender.id, event.message.text);
+      } catch (err) {
         console.error("Error handling message:", err.message);
-      });
+      }
     }
   }
-});
+}
 
 async function handleMessage(senderId, userText) {
   console.log(`Message from ${senderId}: ${userText}`);
@@ -818,17 +851,25 @@ async function sendMessage(recipientId, text, options = {}) {
   return data;
 }
 
-/** After a human replied, Meta may require HUMAN_AGENT tag for the next automated message. */
+/** After a human replied, Meta may require a message tag for the next automated send. */
 async function sendMessageWithFallback(recipientId, text) {
-  try {
-    return await sendMessage(recipientId, text, { messagingType: "RESPONSE" });
-  } catch (firstErr) {
-    console.warn(
-      `Send with RESPONSE failed for ${recipientId}, retrying with HUMAN_AGENT tag:`,
-      firstErr.message
-    );
-    return await sendMessage(recipientId, text, { tag: "HUMAN_AGENT" });
+  const attempts = [
+    { label: "RESPONSE", opts: { messagingType: "RESPONSE" } },
+    { label: "HUMAN_AGENT", opts: { tag: "HUMAN_AGENT" } },
+    { label: "ACCOUNT_UPDATE", opts: { tag: "ACCOUNT_UPDATE" } },
+  ];
+
+  let lastError;
+  for (const { label, opts } of attempts) {
+    try {
+      return await sendMessage(recipientId, text, opts);
+    } catch (err) {
+      lastError = err;
+      console.warn(`Send ${label} failed for ${recipientId}:`, err.message);
+    }
   }
+
+  throw lastError || new Error("All send attempts failed");
 }
 
 // --- Startup checks ---
