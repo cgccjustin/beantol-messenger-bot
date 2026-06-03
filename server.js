@@ -404,14 +404,18 @@ function pauseBotForAdminTakeover(customerId) {
 }
 
 async function resumeBotForCustomer(customerId) {
-  const wasPaused = Boolean(getActiveHandoff(customerId));
+  const hadHandoff = Boolean(getActiveHandoff(customerId));
   resolveHandoff(customerId);
-  if (!wasPaused) {
-    console.log(`Resume command for ${customerId} — bot was already active.`);
-    return;
+  console.log(
+    `Handoff cleared for ${customerId} via admin resume command (was paused: ${hadHandoff}).`
+  );
+
+  try {
+    await sendMessageWithFallback(customerId, BOT_RESUME_REPLY);
+    console.log(`Resume confirmation sent to ${customerId}.`);
+  } catch (err) {
+    console.error(`Resume confirmation failed for ${customerId}:`, err.message);
   }
-  console.log(`Handoff cleared for ${customerId} — admin resume command.`);
-  await sendMessage(customerId, BOT_RESUME_REPLY);
 }
 
 function handlePageMessageEcho(event) {
@@ -782,16 +786,24 @@ async function handleMessage(senderId, userText) {
   await sendMessage(senderId, sanitizeBotReply(reply));
 }
 
-async function sendMessage(recipientId, text) {
+async function sendMessage(recipientId, text, options = {}) {
   const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+  const payload = {
+    recipient: { id: recipientId },
+    message: { text },
+  };
+
+  if (options.tag) {
+    payload.messaging_type = "MESSAGE_TAG";
+    payload.tag = options.tag;
+  } else {
+    payload.messaging_type = options.messagingType || "RESPONSE";
+  }
 
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      recipient: { id: recipientId },
-      message: { text },
-    }),
+    body: JSON.stringify(payload),
   });
 
   const data = await response.json();
@@ -803,6 +815,20 @@ async function sendMessage(recipientId, text) {
 
   rememberBotMessageId(data.message_id);
   console.log(`Reply sent to ${recipientId}`);
+  return data;
+}
+
+/** After a human replied, Meta may require HUMAN_AGENT tag for the next automated message. */
+async function sendMessageWithFallback(recipientId, text) {
+  try {
+    return await sendMessage(recipientId, text, { messagingType: "RESPONSE" });
+  } catch (firstErr) {
+    console.warn(
+      `Send with RESPONSE failed for ${recipientId}, retrying with HUMAN_AGENT tag:`,
+      firstErr.message
+    );
+    return await sendMessage(recipientId, text, { tag: "HUMAN_AGENT" });
+  }
 }
 
 // --- Startup checks ---
