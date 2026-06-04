@@ -1805,7 +1805,7 @@ async function loadPageId() {
 
 const WEBHOOK_SUBSCRIBED_FIELDS =
   process.env.WEBHOOK_SUBSCRIBED_FIELDS ||
-  "messages,message_echoes,messaging_postbacks";
+  "messages,messaging_postbacks";
 
 /** Meta often requires this for Instagram DMs to hit your webhook (not only Business Suite). */
 async function ensureMessagingSubscriptions() {
