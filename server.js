@@ -1325,6 +1325,19 @@ app.get("/admin/meta-status", async (req, res) => {
   });
 });
 
+app.get("/admin/subscribe-webhooks", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const result = await ensureMessagingSubscriptions();
+  const status = await getMessagingSubscriptionStatus().catch((e) => ({
+    error: e.message,
+  }));
+  res.json({
+    subscribeResult: result,
+    currentSubscriptions: status,
+    hint: "If subscribe failed, set PAGE_ID on Render. For personal IG DMs (not app admins), instagram_manage_messages must be Approved in App Review.",
+  });
+});
+
 // --- Admin: send a test email (Resend or SMTP) ---
 app.get("/admin/test-email", async (req, res) => {
   if (!requireAdmin(req, res)) return;
@@ -1780,7 +1793,7 @@ async function loadPageId() {
       return;
     }
     console.log(
-      "Page ID API lookup not available (permission not required). Optional: set PAGE_ID on Render. Echo webhooks still detect admin messages when Meta sends them."
+      "Page ID API lookup not available (permission not required). Set PAGE_ID on Render for IG webhook subscribe."
     );
     if (DEBUG_WEBHOOK) {
       console.log("loadPageId response:", JSON.stringify(data));
@@ -1790,9 +1803,56 @@ async function loadPageId() {
   }
 }
 
+const WEBHOOK_SUBSCRIBED_FIELDS =
+  process.env.WEBHOOK_SUBSCRIBED_FIELDS ||
+  "messages,message_echoes,messaging_postbacks";
+
+/** Meta often requires this for Instagram DMs to hit your webhook (not only Business Suite). */
+async function ensureMessagingSubscriptions() {
+  const pid = PAGE_ID_ENV || pageId;
+  if (!pid || !PAGE_ACCESS_TOKEN) {
+    console.log(
+      "Messaging subscription skipped — set PAGE_ID on Render, redeploy, then /admin/subscribe-webhooks?token=..."
+    );
+    return { skipped: true, reason: "PAGE_ID or PAGE_ACCESS_TOKEN missing" };
+  }
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/v19.0/${encodeURIComponent(pid)}/subscribed_apps?subscribed_fields=${encodeURIComponent(WEBHOOK_SUBSCRIBED_FIELDS)}&access_token=${PAGE_ACCESS_TOKEN}`,
+      { method: "POST" }
+    );
+    const data = await response.json();
+    if (data.success === true) {
+      console.log(
+        `Page ${pid} subscribed_apps OK (${WEBHOOK_SUBSCRIBED_FIELDS}) — required for IG + Messenger webhooks.`
+      );
+      return { ok: true, pageId: pid, data };
+    }
+    console.warn("Page subscribed_apps failed:", JSON.stringify(data));
+    return { ok: false, pageId: pid, data };
+  } catch (err) {
+    console.warn("Page subscribed_apps error:", err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+async function getMessagingSubscriptionStatus() {
+  const pid = PAGE_ID_ENV || pageId;
+  if (!pid || !PAGE_ACCESS_TOKEN) {
+    return { error: "PAGE_ID or PAGE_ACCESS_TOKEN missing" };
+  }
+  const response = await fetch(
+    `https://graph.facebook.com/v19.0/${encodeURIComponent(pid)}/subscribed_apps?access_token=${PAGE_ACCESS_TOKEN}`
+  );
+  const data = await response.json();
+  return { pageId: pid, data };
+}
+
 checkConfig();
 verifyEmailOnStartup().catch(() => {});
-loadPageId().catch(() => {});
+loadPageId()
+  .catch(() => {})
+  .then(() => ensureMessagingSubscriptions());
 
 app.listen(PORT, () => {
   console.log(`Beantol bot listening on port ${PORT}`);
