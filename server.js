@@ -1334,7 +1334,9 @@ app.get("/admin/subscribe-webhooks", async (req, res) => {
   res.json({
     subscribeResult: result,
     currentSubscriptions: status,
-    hint: "If subscribe failed, set PAGE_ID on Render. For personal IG DMs (not app admins), instagram_manage_messages must be Approved in App Review.",
+    hint:
+      result.hint ||
+      "If subscribe failed, set PAGE_ID on Render. For personal IG DMs (not app admins), instagram_manage_messages must be Approved in App Review.",
   });
 });
 
@@ -1803,9 +1805,23 @@ async function loadPageId() {
   }
 }
 
-const WEBHOOK_SUBSCRIBED_FIELDS =
-  process.env.WEBHOOK_SUBSCRIBED_FIELDS ||
-  "messages,messaging_postbacks";
+const DEFAULT_SUBSCRIBED_FIELD_SETS = ["messages", "messages,messaging_postbacks"];
+
+function getSubscribedFieldAttempts() {
+  if (process.env.WEBHOOK_SUBSCRIBED_FIELDS) {
+    return [process.env.WEBHOOK_SUBSCRIBED_FIELDS.trim()];
+  }
+  return DEFAULT_SUBSCRIBED_FIELD_SETS;
+}
+
+async function subscribePageApps(pageId, subscribedFields) {
+  const response = await fetch(
+    `https://graph.facebook.com/v19.0/${encodeURIComponent(pageId)}/subscribed_apps?subscribed_fields=${encodeURIComponent(subscribedFields)}&access_token=${PAGE_ACCESS_TOKEN}`,
+    { method: "POST" }
+  );
+  const data = await response.json();
+  return { ok: response.ok && data.success === true, data, subscribedFields };
+}
 
 /** Meta often requires this for Instagram DMs to hit your webhook (not only Business Suite). */
 async function ensureMessagingSubscriptions() {
@@ -1816,24 +1832,44 @@ async function ensureMessagingSubscriptions() {
     );
     return { skipped: true, reason: "PAGE_ID or PAGE_ACCESS_TOKEN missing" };
   }
-  try {
-    const response = await fetch(
-      `https://graph.facebook.com/v19.0/${encodeURIComponent(pid)}/subscribed_apps?subscribed_fields=${encodeURIComponent(WEBHOOK_SUBSCRIBED_FIELDS)}&access_token=${PAGE_ACCESS_TOKEN}`,
-      { method: "POST" }
-    );
-    const data = await response.json();
-    if (data.success === true) {
-      console.log(
-        `Page ${pid} subscribed_apps OK (${WEBHOOK_SUBSCRIBED_FIELDS}) — required for IG + Messenger webhooks.`
+
+  const attempts = [];
+  for (const fields of getSubscribedFieldAttempts()) {
+    if (!fields) continue;
+    try {
+      const result = await subscribePageApps(pid, fields);
+      attempts.push(result);
+      if (result.ok) {
+        console.log(
+          `Page ${pid} subscribed_apps OK (${fields}) — required for IG + Messenger webhooks.`
+        );
+        return { ok: true, pageId: pid, subscribedFields: fields, data: result.data, attempts };
+      }
+      const err = result.data?.error;
+      console.warn(
+        `Page subscribed_apps failed for fields=${fields}:`,
+        JSON.stringify(result.data)
       );
-      return { ok: true, pageId: pid, data };
+      if (err?.code === 100 && String(err.message || "").includes("message_echoes")) {
+        console.warn(
+          "Remove message_echoes from WEBHOOK_SUBSCRIBED_FIELDS on Render — enable echoes in Meta webhook UI instead."
+        );
+      }
+    } catch (err) {
+      attempts.push({ ok: false, subscribedFields: fields, error: err.message });
+      console.warn(`Page subscribed_apps error for fields=${fields}:`, err.message);
     }
-    console.warn("Page subscribed_apps failed:", JSON.stringify(data));
-    return { ok: false, pageId: pid, data };
-  } catch (err) {
-    console.warn("Page subscribed_apps error:", err.message);
-    return { ok: false, error: err.message };
   }
+
+  const last = attempts[attempts.length - 1];
+  return {
+    ok: false,
+    pageId: pid,
+    attempts,
+    data: last?.data,
+    hint:
+      "Meta error (#1) is often temporary — retry /admin/subscribe-webhooks in a few minutes. If you already saw success:true once, subscription may be active. Regenerate PAGE_ACCESS_TOKEN if it keeps failing. Do not set WEBHOOK_SUBSCRIBED_FIELDS=message_echoes on Render.",
+  };
 }
 
 async function getMessagingSubscriptionStatus() {
