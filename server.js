@@ -32,7 +32,7 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
 
 const HANDOFF_REPLY =
-  "Got it — I am connecting you with our team. A Beantol team member will reply to you personally here on Messenger as soon as they can. Please stay on this chat.";
+  "Got it — I am connecting you with our team. A Beantol team member will reply to you personally here in this chat as soon as they can. Please stay on this thread.";
 
 const BOT_RESUME_REPLY =
   process.env.BOT_RESUME_REPLY ||
@@ -315,7 +315,7 @@ function getReplyLanguageInstruction(senderId) {
 }
 
 // Beantol Coffee Roasters — business knowledge for the AI
-const SYSTEM_PROMPT = `You are Beantol Coffee Roasters' friendly AI sales and customer support assistant on Facebook Messenger. You help customers discover the right coffee, answer questions, and move naturally toward ordering — warm and helpful, never pushy or spammy.
+const SYSTEM_PROMPT = `You are Beantol Coffee Roasters' friendly AI sales and customer support assistant on Facebook Messenger and Instagram DMs. You help customers discover the right coffee, answer questions, and move naturally toward ordering — warm and helpful, never pushy or spammy.
 
 ABOUT US:
 We are a local coffee roastery in Cebu City. We serve coffee shops across Cebu with quality Arabica beans — single origin, blends, espresso-focused beans, and curated pour-over coffee beans.
@@ -547,7 +547,19 @@ RULES:
 - BEAN DETAILS: Never paste the entire ESPRESSO BEAN DETAILS section — only the bean in context (named now or discussed earlier in the thread).
 - OWNERSHIP / TEAM: Do not list founder or owner names unless the customer insists after the group answer. For "who owns" first ask → group of enthusiasts answer only; names only on follow-up insistence.
 - Keep replies short (2–4 sentences) unless the customer asks for more detail, is placing an order (order summary OK), or delivery step 2 applies.
-- Tone: friendly, warm, professional, lightly sales-forward — like a knowledgeable barista who wants to help you find the right bag.
+- FORMATTING & PUNCTUATION (Messenger/Instagram — plain text only, no markdown):
+  • Write in complete sentences with correct capitalization and punctuation (periods, commas, question marks). Never send one long run-on block.
+  • Use a blank line between sections when a reply has multiple parts (e.g. greeting, then prices, then a question).
+  • For prices, sizes, order summaries, or delivery details, use short bullet lines starting with "• " (one item per line). Example:
+    Beantol Prime (espresso):
+    • 250g — ₱420
+    • 500g — ₱780
+    • 1kg — ₱1,450
+  • Use the peso sign ₱ and comma thousands (₱1,450 not 1450). Spell out g for grams (250g, 500g, 1kg).
+  • End with one clear question when you need a reply from the customer (pickup or delivery? which size?).
+  • Do not use markdown (no **bold**, no # headers, no [links]). Do not use ALL CAPS except normal acronyms.
+  • Keep paragraphs to 1–3 sentences max. Easy to scan on a phone.
+- Tone: friendly, warm, professional, lightly sales-forward — like a knowledgeable barista who wants to help you find the right bag. Polished and presentable, never sloppy or chat-speak unless the customer uses it first.
 - LANGUAGE (strict): Your reply language is chosen by the server instruction on each message — follow it exactly. Default is English only. Never mirror the language the customer used unless the server says they requested Bisaya/Cebuano or Tagalog replies. Examples: "Naa mo?" / "Open pa?" → English. "Puede ka mag bisaya?" / "Bisaya lang" → Cebuano/Bisaya (NOT handoff).
 - LANGUAGE CHANGE IS NOT HANDOFF: Switching language is not handoff. Examples: "puede ka mag bisaya" → Bisaya; "English balik bi" / "balik english" / "English please" → English again. Never use [[HANDOFF]] for language switches.
 - HUMAN HANDOFF: When they want a real person, agent, staff, or customer representative — or reply YES (or oo / yes po) after you offered a representative following delivery details — use [[HANDOFF]] only during live support hours (9 AM–9 PM Philippine time). Outside those hours, never use [[HANDOFF]]; use the after-hours support message instead. The server sends the handoff message and pauses the bot when [[HANDOFF]] is allowed.
@@ -1780,7 +1792,13 @@ async function verifyEmailOnStartup() {
 async function loadPageId() {
   if (PAGE_ID_ENV) {
     pageId = String(PAGE_ID_ENV);
-    console.log(`Page ID from PAGE_ID env: ${pageId}`);
+    if (isLikelyInstagramAccountId(pageId)) {
+      console.warn(
+        `PAGE_ID env looks like Instagram ID (${pageId}), not Facebook Page ID. Use Page → About → Page ID (e.g. 124972487369170).`
+      );
+    } else {
+      console.log(`Page ID from PAGE_ID env: ${pageId}`);
+    }
     return;
   }
   if (!PAGE_ACCESS_TOKEN) return;
@@ -1814,6 +1832,23 @@ function getSubscribedFieldAttempts() {
   return DEFAULT_SUBSCRIBED_FIELD_SETS;
 }
 
+function isLikelyInstagramAccountId(id) {
+  const s = String(id || "");
+  return s.startsWith("178414") || s.startsWith("17841");
+}
+
+function validatePageIdForApi(pageIdValue) {
+  if (!pageIdValue) return { valid: false, reason: "missing" };
+  if (isLikelyInstagramAccountId(pageIdValue)) {
+    return {
+      valid: false,
+      reason:
+        "PAGE_ID looks like an Instagram account ID (178414...). Use your Facebook Page ID from Page → About (you previously had success with 124972487369170).",
+    };
+  }
+  return { valid: true };
+}
+
 async function subscribePageApps(pageId, subscribedFields) {
   const response = await fetch(
     `https://graph.facebook.com/v19.0/${encodeURIComponent(pageId)}/subscribed_apps?subscribed_fields=${encodeURIComponent(subscribedFields)}&access_token=${PAGE_ACCESS_TOKEN}`,
@@ -1831,6 +1866,12 @@ async function ensureMessagingSubscriptions() {
       "Messaging subscription skipped — set PAGE_ID on Render, redeploy, then /admin/subscribe-webhooks?token=..."
     );
     return { skipped: true, reason: "PAGE_ID or PAGE_ACCESS_TOKEN missing" };
+  }
+
+  const pageCheck = validatePageIdForApi(pid);
+  if (!pageCheck.valid) {
+    console.warn(`PAGE_ID invalid for subscribed_apps: ${pageCheck.reason}`);
+    return { ok: false, pageId: pid, skipped: true, reason: pageCheck.reason };
   }
 
   const attempts = [];
