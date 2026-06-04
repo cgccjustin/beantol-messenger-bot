@@ -1414,12 +1414,18 @@ app.get("/webhook", (req, res) => {
 
 // --- Meta webhook: Facebook Page + Instagram DMs ---
 app.post("/webhook", (req, res) => {
-  const body = req.body;
+  const body = req.body || {};
+  console.log(
+    `Webhook POST received object="${body.object || "missing"}" entries=${body.entry?.length ?? 0}`
+  );
 
   if (!isSupportedWebhookObject(body.object)) {
     console.log(
-      `Webhook ignored — unsupported object="${body?.object || "missing"}" (expected page or instagram).`
+      `Webhook ignored — unsupported object="${body?.object || "missing"}" (expected page or instagram). Full keys: ${Object.keys(body).join(", ")}`
     );
+    if (body.entry?.length) {
+      console.log("Webhook raw (truncated):", JSON.stringify(body).slice(0, 800));
+    }
     return res.sendStatus(404);
   }
 
