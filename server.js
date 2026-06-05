@@ -412,9 +412,27 @@ function buildPendingSizeConfirmationNote(senderId, userText) {
   if (!isAffirmativeWithoutSize(userText) || !lastAssistantAskedForSize(senderId)) {
     return "";
   }
+  const history = getChatHistory(senderId);
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role !== "assistant") continue;
+    const content = history[i].content || "";
+    if (
+      mentionedFilterRoasts(content).length &&
+      /\b(?:which size|what size|preferred size|confirm the size|available in 250g)\b/i.test(
+        content
+      )
+    ) {
+      return (
+        "FILTER ROAST PROCEED: Customer agreed to a filter roast (250g only). Do NOT ask which size or " +
+        "preferred size again. Include it as 250g in the order summary and ask pickup/delivery or " +
+        "whether to proceed with the order."
+      );
+    }
+    break;
+  }
   return (
-    "ORDER SIZE REQUIRED: You asked which size. The customer replied affirmatively but did NOT choose " +
-    "250g, 500g, 1kg, or wholesale. Ask which size they want — do NOT assume 250g or any default. " +
+    "ORDER SIZE REQUIRED: You asked which size for an espresso bean. The customer replied affirmatively " +
+    "but did NOT choose 250g, 500g, 1kg, or wholesale. Ask which size they want — do NOT assume 250g. " +
     "Do not summarize an order with a size until they choose one."
   );
 }
@@ -436,6 +454,35 @@ function buildOrderCorrectionNote(userText) {
     "are 250g retail ONLY — never 500g or 1kg (₱700 is Mt. Apo 250g). Apply a stated size only to the bean " +
     "they name (e.g. '1kg of Santos' updates Santos only; Mt. Apo without a size stays 250g). Replace wrong " +
     "sizes — never list the same bean twice at different sizes."
+  );
+}
+
+function mentionedFilterRoasts(text) {
+  const t = String(text || "");
+  const items = [];
+  if (/\bmt\.?\s*apo ellaga\b|\bellaga\b|\bdione ellaga\b/i.test(t)) {
+    items.push("Mt. Apo (Ellaga)");
+  } else if (/\bmt\.?\s*apo\b|\bmount apo\b/i.test(t)) {
+    items.push("Mt. Apo");
+  }
+  if (/\bguji filter\b|\bfilter guji\b/i.test(t)) items.push("Guji (filter)");
+  if (/\bkenya filter\b|\bfilter kenya\b/i.test(t)) items.push("Kenya (filter)");
+  return items;
+}
+
+function buildFilterRoastOnlySizeNote(senderId, userText) {
+  const history = getChatHistory(senderId);
+  const combined = [
+    userText,
+    ...history.slice(-6).map((message) => message.content),
+  ].join("\n");
+  const items = mentionedFilterRoasts(combined);
+  if (!items.length) return "";
+  return (
+    `FILTER ROAST — SINGLE SIZE ONLY: ${items.join(", ")} retail in 250g only. ` +
+    "Do NOT ask which size, preferred size, or to confirm the size for these beans. " +
+    "Use 250g automatically in the order summary. Ask whether to proceed with that item, " +
+    "or pickup vs delivery if the rest of the order is ready."
   );
 }
 
@@ -2629,6 +2676,10 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       const correctionNote = buildOrderCorrectionNote(userText);
       if (correctionNote) {
         systemMessages.push({ role: "system", content: correctionNote });
+      }
+      const filterSizeNote = buildFilterRoastOnlySizeNote(senderId, userText);
+      if (filterSizeNote) {
+        systemMessages.push({ role: "system", content: filterSizeNote });
       }
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
