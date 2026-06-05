@@ -133,6 +133,10 @@ const DEBUG_WEBHOOK = process.env.DEBUG_WEBHOOK === "true";
 const PAGE_ID_ENV = process.env.PAGE_ID;
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
 const INSTAGRAM_USERNAME = process.env.INSTAGRAM_USERNAME;
+/** Business Suite / Page Inbox app id on echo webhooks (Meta Graph API v12+) */
+const META_PAGE_INBOX_APP_ID =
+  process.env.META_PAGE_INBOX_APP_ID || "26390203743090";
+const META_APP_ID_ENV = process.env.META_APP_ID || "";
 const SUPPORT_TIMEZONE = process.env.SUPPORT_TIMEZONE || "Asia/Manila";
 const SUPPORT_HOURS_START = Number(process.env.SUPPORT_HOURS_START || 9);
 const SUPPORT_HOURS_END = Number(process.env.SUPPORT_HOURS_END || 21);
@@ -306,6 +310,13 @@ let pageId = null;
 
 /** Page / IG account IDs seen on outbound (echo) webhooks */
 const outboundSenderIds = new Set();
+
+/** Meta app id for PAGE_ACCESS_TOKEN — used to ignore our own API echoes */
+let metaAppId = META_APP_ID_ENV;
+
+/** Recent webhook events for admin debugging (in-memory) */
+const webhookDebugLog = [];
+const WEBHOOK_DEBUG_MAX = 40;
 
 /** Message IDs sent by this bot — used to ignore echoes of our own replies */
 const botSentMessageIds = new Set();
@@ -829,8 +840,28 @@ function getOutboundSenderIds() {
   return ids;
 }
 
+function truthyEcho(value) {
+  return value === true || value === "true" || value === 1;
+}
+
+function isMessageEchoEvent(event) {
+  return truthyEcho(event.message?.is_echo);
+}
+
+function getMessageAppId(event) {
+  const id = event.message?.app_id;
+  return id != null && id !== "" ? String(id) : "";
+}
+
+function recordWebhookDebug(entry) {
+  webhookDebugLog.push({ at: new Date().toISOString(), ...entry });
+  if (webhookDebugLog.length > WEBHOOK_DEBUG_MAX) {
+    webhookDebugLog.shift();
+  }
+}
+
 function rememberOutboundSenderFromEvent(event) {
-  if (event.message?.is_echo !== true || !event.sender?.id) return;
+  if (!isMessageEchoEvent(event) || !event.sender?.id) return;
   const senderId = String(event.sender.id);
   outboundSenderIds.add(senderId);
   if (!pageId || pageId === senderId) {
@@ -841,8 +872,42 @@ function rememberOutboundSenderFromEvent(event) {
   }
 }
 
+function resolveEchoCustomerId(event, entryId = "", platform = "messenger") {
+  const sender = event.sender?.id ? String(event.sender.id) : "";
+  const recipient = event.recipient?.id ? String(event.recipient.id) : "";
+  const outbound = getOutboundSenderIds();
+  if (entryId) outbound.add(String(entryId));
+
+  if (recipient && !outbound.has(recipient)) return recipient;
+  if (sender && !outbound.has(sender)) return sender;
+  return recipient || sender;
+}
+
+function isBotOwnEcho(event, text = "") {
+  const msg = event.message;
+  if (!msg) return false;
+  const appId = getMessageAppId(event);
+  if (metaAppId && appId && appId === metaAppId) return true;
+  if (msg.mid && botSentMessageIds.has(msg.mid)) return true;
+  if (text && isKnownBotOutboundText(text)) return true;
+  return false;
+}
+
+function isHumanAdminEcho(event, text = "") {
+  if (!isMessageEchoEvent(event)) {
+    const senderId = event.sender?.id ? String(event.sender.id) : "";
+    return Boolean(senderId && getOutboundSenderIds().has(senderId) && !isBotOwnEcho(event, text));
+  }
+  if (isBotOwnEcho(event, text)) return false;
+  const appId = getMessageAppId(event);
+  if (appId === META_PAGE_INBOX_APP_ID) return true;
+  if (metaAppId && appId && appId !== metaAppId) return true;
+  if (!appId && !isBotOwnEcho(event, text)) return true;
+  return false;
+}
+
 function isOutboundFromPage(event, entryId = "", platform = "messenger") {
-  if (event.message?.is_echo === true) return true;
+  if (isMessageEchoEvent(event)) return true;
   const senderId = event.sender?.id ? String(event.sender.id) : "";
   if (!senderId) return false;
   if (getOutboundSenderIds().has(senderId)) return true;
@@ -851,7 +916,7 @@ function isOutboundFromPage(event, entryId = "", platform = "messenger") {
 }
 
 function isOutboundWebhookCandidate(event, entryId = "", platform = "messenger") {
-  if (event.message?.is_echo === true) return true;
+  if (isMessageEchoEvent(event)) return true;
   return isOutboundFromPage(event, entryId, platform);
 }
 
@@ -905,24 +970,84 @@ async function resumeBotForCustomer(customerId, adminText) {
   }
 }
 
+async function handleHandoverEvent(event, platform = "messenger") {
+  const customerId = event.sender?.id ? String(event.sender.id) : "";
+  if (!customerId) return;
+
+  if (event.take_thread_control) {
+    const prev = event.take_thread_control.previous_owner_app_id;
+    console.log(
+      `take_thread_control for ${customerId} — previous_owner_app_id=${prev} (pausing bot).`
+    );
+    recordWebhookDebug({
+      kind: "take_thread_control",
+      platform,
+      customerId,
+      previousOwner: prev,
+    });
+    pauseBotForAdminTakeover(
+      customerId,
+      "Human took thread control (Business Suite)",
+      platform
+    );
+    return;
+  }
+
+  if (event.pass_thread_control) {
+    console.log(`pass_thread_control for ${customerId}:`, JSON.stringify(event.pass_thread_control));
+    recordWebhookDebug({
+      kind: "pass_thread_control",
+      platform,
+      customerId,
+      targetAppId: event.pass_thread_control.target_app_id,
+    });
+  }
+}
+
 async function handlePageOutbound(event, platform = "messenger", entryId = "") {
+  const text = event.message?.text || "";
+  const appId = getMessageAppId(event);
+  const customerId = resolveEchoCustomerId(event, entryId, platform);
+  const mid = event.message?.mid;
+  const humanEcho = isHumanAdminEcho(event, text);
+  const botEcho = isBotOwnEcho(event, text);
+
+  recordWebhookDebug({
+    kind: "page_outbound",
+    platform,
+    entryId,
+    echo: isMessageEchoEvent(event),
+    appId: appId || "(none)",
+    metaAppId: metaAppId || "(unknown)",
+    inboxAppId: META_PAGE_INBOX_APP_ID,
+    sender: event.sender?.id,
+    recipient: event.recipient?.id,
+    customerId,
+    humanEcho,
+    botEcho,
+    text: text.slice(0, 160),
+  });
+
   if (!isOutboundFromPage(event, entryId, platform)) return;
 
-  const customerId = event.recipient?.id;
-  const mid = event.message?.mid;
-  const text = event.message?.text || "";
-  if (!customerId) {
-    console.log("Page outbound missing customerId:", JSON.stringify(event).slice(0, 400));
+  if (!customerId || getOutboundSenderIds().has(String(customerId))) {
+    console.log(
+      `Page outbound skipped — no customer PSID (resolved=${customerId || "none"}).`
+    );
     return;
   }
-  if (getOutboundSenderIds().has(String(customerId))) {
-    console.log("Page outbound skipped — recipient is page/IG account, not customer.");
+
+  if (botEcho) return;
+
+  if (!humanEcho) {
+    console.log(
+      `Page outbound ignored for ${customerId} — not classified as human admin (app_id=${appId || "none"}).`
+    );
     return;
   }
-  if (mid && botSentMessageIds.has(mid)) return;
 
   console.log(
-    `Page outbound → customer ${customerId}: echo=${Boolean(event.message?.is_echo)} text=${JSON.stringify(text)} resume=${isAdminResumeCommand(text)} platform=${platform}`
+    `Page outbound → customer ${customerId}: echo=${isMessageEchoEvent(event)} app_id=${appId || "none"} human=true text=${JSON.stringify(text)} platform=${platform}`
   );
 
   if (isAdminResumeCommand(text)) {
@@ -930,9 +1055,7 @@ async function handlePageOutbound(event, platform = "messenger", entryId = "") {
     return;
   }
 
-  if (!text.trim()) return;
-
-  pauseBotForAdminTakeover(customerId, text, platform);
+  pauseBotForAdminTakeover(customerId, text.trim() || "[admin message]", platform);
 }
 
 async function expireStaleAdminTakeovers() {
@@ -1592,8 +1715,8 @@ app.get("/admin", async (req, res) => {
     const fields = [...extractSubscribedFieldsFromStatus(subStatus)].sort().join(", ") || "unknown";
     const echoesOn = hasMessageEchoesSubscription(subStatus);
     webhookSubHtml = echoesOn
-      ? `<p class="muted"><strong>Webhook:</strong> message_echoes <span style="color:#0a7">on</span> (${escapeHtml(fields)}) — admin replies from Business Suite should pause the bot.</p>`
-      : `<div class="alert-warn"><strong>Webhook:</strong> <code>message_echoes</code> is <strong>not</strong> subscribed (${escapeHtml(fields)}). The bot cannot detect when you reply in Business Suite. In <a href="https://developers.facebook.com/" target="_blank" rel="noopener">Meta Developer</a> → your app → Webhooks → Page (and Instagram) → enable <strong>message_echoes</strong>, then <a href="/admin/subscribe-webhooks?token=${encodeURIComponent(token)}">re-subscribe webhooks</a>.</div>`;
+      ? `<p class="muted"><strong>Webhook:</strong> message_echoes <span style="color:#0a7">on</span> (${escapeHtml(fields)}) — admin replies should arrive with <code>app_id=${META_PAGE_INBOX_APP_ID}</code>. <a href="/admin/webhook-log?token=${encodeURIComponent(token)}">Webhook debug log →</a></p>`
+      : `<div class="alert-warn"><strong>Webhook:</strong> <code>message_echoes</code> is <strong>not</strong> subscribed via API (${escapeHtml(fields)}). Enable it in <a href="https://developers.facebook.com/" target="_blank" rel="noopener">Meta Developer</a> → Webhooks → your Page, then <a href="/admin/subscribe-webhooks?token=${encodeURIComponent(token)}">re-subscribe</a>. <a href="/admin/webhook-log?token=${encodeURIComponent(token)}">Debug log →</a></div>`;
   } catch (_) {
     webhookSubHtml = `<p class="muted"><strong>Webhook:</strong> could not check subscription — set <code>PAGE_ID</code> on Render.</p>`;
   }
@@ -2445,6 +2568,51 @@ app.get("/admin/meta-status", async (req, res) => {
   });
 });
 
+app.get("/admin/webhook-log", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  const accept = req.headers.accept || "";
+  const payload = {
+    count: webhookDebugLog.length,
+    metaAppId: metaAppId || null,
+    pageInboxAppId: META_PAGE_INBOX_APP_ID,
+    pageId: pageId || PAGE_ID_ENV || null,
+    events: [...webhookDebugLog].reverse(),
+    hint:
+      "Reply as admin from Business Suite, then refresh. Human echoes should show app_id=26390203743090 and humanEcho=true.",
+  };
+  if (req.query.format !== "json" && accept.includes("text/html") && !accept.includes("application/json")) {
+    const rows = payload.events
+      .map((e) => {
+        const detail = [
+          e.kind,
+          e.platform,
+          e.echo != null ? `echo=${e.echo}` : "",
+          e.appId ? `app_id=${e.appId}` : "",
+          e.humanEcho != null ? `human=${e.humanEcho}` : "",
+          e.customerId ? `customer=${e.customerId}` : "",
+          e.text ? `text=${e.text}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return `<tr><td>${escapeHtml(e.at)}</td><td>${escapeHtml(detail)}</td></tr>`;
+      })
+      .join("");
+    return res.type("html").send(
+      renderPage({
+        title: "Webhook debug log",
+        active: "overview",
+        token,
+        body: `<p class="muted">Last ${payload.count} webhook events (newest first). <a href="/admin/webhook-log?token=${encodeURIComponent(token)}&format=json">JSON</a></p>
+<p class="muted">Bot app id: <code>${escapeHtml(String(payload.metaAppId || "unknown"))}</code> · Page Inbox app id: <code>${escapeHtml(payload.pageInboxAppId)}</code></p>
+${rows ? `<table><tr><th>Time (UTC)</th><th>Event</th></tr>${rows}</table>` : "<p>No events yet — send a test message.</p>"}
+<p class="muted"><a href="/admin?token=${encodeURIComponent(token)}">← Overview</a></p>`,
+      })
+    );
+  }
+  res.json(payload);
+});
+
 app.get("/admin/subscribe-webhooks", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const result = await ensureMessagingSubscriptions();
@@ -2613,6 +2781,14 @@ function collectMessagingEvents(body) {
     for (const event of entry.standby || []) {
       items.push({ event, channel: "standby", platform, entryId: entry.id });
     }
+    for (const event of entry.messaging_handovers || []) {
+      items.push({
+        event,
+        channel: "messaging_handovers",
+        platform,
+        entryId: entry.id,
+      });
+    }
     for (const change of entry.changes || []) {
       if (change.field !== "messages") continue;
       const value = change.value;
@@ -2649,6 +2825,15 @@ async function processWebhookEvents(body) {
   await expireStaleAdminTakeovers();
 
   for (const { event, channel, platform, entryId } of collectMessagingEvents(body)) {
+    if (channel === "messaging_handovers") {
+      try {
+        await handleHandoverEvent(event, platform);
+      } catch (err) {
+        console.error(`Handover event error (${platform}):`, err.message);
+      }
+      continue;
+    }
+
     const text = getInboundMessageText(event);
     const hasMessage = Boolean(event.message || event.postback);
 
@@ -2661,14 +2846,18 @@ async function processWebhookEvents(body) {
 
     rememberOutboundSenderFromEvent(event);
 
-    if (
+    if (isMessageEchoEvent(event)) {
+      console.log(
+        `Webhook ECHO ${platform}/${channel}: app_id=${getMessageAppId(event) || "none"} botApp=${metaAppId || "?"} inboxApp=${META_PAGE_INBOX_APP_ID} sender=${event.sender?.id} recipient=${event.recipient?.id} human=${isHumanAdminEcho(event, text)} text=${JSON.stringify(text).slice(0, 80)}`
+      );
+    } else if (
       DEBUG_WEBHOOK ||
       /#bot/i.test(text) ||
       platform === "instagram" ||
       isOutboundWebhookCandidate(event, entryId, platform)
     ) {
       console.log(
-        `Webhook ${platform}/${channel}: echo=${Boolean(event.message?.is_echo)} self=${Boolean(event.message?.is_self)} sender=${event.sender?.id} recipient=${event.recipient?.id} entry=${entryId} text=${JSON.stringify(text)}`
+        `Webhook ${platform}/${channel}: echo=false self=${Boolean(event.message?.is_self)} sender=${event.sender?.id} recipient=${event.recipient?.id} entry=${entryId} text=${JSON.stringify(text)}`
       );
     }
 
@@ -3070,6 +3259,22 @@ async function verifyEmailOnStartup() {
   }
 }
 
+async function loadMetaAppId() {
+  if (metaAppId || !PAGE_ACCESS_TOKEN) return;
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/v19.0/debug_token?input_token=${encodeURIComponent(PAGE_ACCESS_TOKEN)}&access_token=${PAGE_ACCESS_TOKEN}`
+    );
+    const data = await response.json();
+    if (data.data?.app_id) {
+      metaAppId = String(data.data.app_id);
+      console.log(`Meta app ID loaded from token: ${metaAppId}`);
+    }
+  } catch (err) {
+    console.log("Meta app ID lookup skipped:", err.message);
+  }
+}
+
 async function loadPageId() {
   if (PAGE_ID_ENV) {
     pageId = String(PAGE_ID_ENV);
@@ -3105,6 +3310,7 @@ async function loadPageId() {
 }
 
 const DEFAULT_SUBSCRIBED_FIELD_SETS = [
+  "messages,messaging_postbacks,message_echoes,messaging_handovers",
   "messages,messaging_postbacks,message_echoes",
   "messages,messaging_postbacks",
   "messages",
@@ -3215,8 +3421,14 @@ function extractSubscribedFieldsFromStatus(status) {
   const apps = status?.data?.data;
   if (!Array.isArray(apps)) return fields;
   for (const app of apps) {
-    for (const f of String(app.subscribed_fields || "").split(",")) {
-      const trimmed = f.trim();
+    const raw = app.subscribed_fields;
+    const list = Array.isArray(raw)
+      ? raw
+      : String(raw || "")
+          .split(",")
+          .map((s) => s.trim());
+    for (const f of list) {
+      const trimmed = String(f).trim();
       if (trimmed) fields.add(trimmed);
     }
   }
@@ -3240,9 +3452,9 @@ function hasMessageEchoesSubscription(status) {
       console.warn("Inventory sheet load:", err.message);
     });
   }
-  loadPageId()
-    .catch(() => {})
-    .then(() => ensureMessagingSubscriptions());
+  Promise.all([loadPageId().catch(() => {}), loadMetaAppId().catch(() => {})]).then(() =>
+    ensureMessagingSubscriptions()
+  );
 
   app.listen(PORT, () => {
     console.log(`Beantol bot listening on port ${PORT}`);
