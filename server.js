@@ -318,7 +318,15 @@ let metaAppId = META_APP_ID_ENV;
 
 /** Recent webhook events for admin debugging (in-memory) */
 const webhookDebugLog = [];
-const WEBHOOK_DEBUG_MAX = 40;
+const WEBHOOK_DEBUG_MAX = 60;
+
+/** Last Meta webhook POST (in-memory — resets on Render restart) */
+const webhookStats = {
+  totalPosts: 0,
+  lastPostAt: null,
+  lastObject: null,
+  lastEventCount: 0,
+};
 
 /** Message IDs sent by this bot — used to ignore echoes of our own replies */
 const botSentMessageIds = new Set();
@@ -853,6 +861,25 @@ function isMessageEchoEvent(event) {
 function getMessageAppId(event) {
   const id = event.message?.app_id;
   return id != null && id !== "" ? String(id) : "";
+}
+
+function formatWebhookDebugDetail(e) {
+  const parts = [e.kind];
+  if (e.object) parts.push(`object=${e.object}`);
+  if (e.platform) parts.push(e.platform);
+  if (e.entryCount != null) parts.push(`entries=${e.entryCount}`);
+  if (e.eventCount != null) parts.push(`parsed=${e.eventCount}`);
+  if (e.supported === false) parts.push("unsupported object");
+  if (e.channel) parts.push(e.channel);
+  if (e.reason) parts.push(`reason=${e.reason}`);
+  if (e.echo != null) parts.push(`echo=${e.echo}`);
+  if (e.appId) parts.push(`app_id=${e.appId}`);
+  if (e.humanEcho != null) parts.push(`human=${e.humanEcho}`);
+  if (e.customerId) parts.push(`customer=${e.customerId}`);
+  if (e.sender) parts.push(`sender=${e.sender}`);
+  if (e.text) parts.push(`text=${e.text}`);
+  if (e.field) parts.push(`field=${e.field}`);
+  return parts.join(" · ");
 }
 
 function recordWebhookDebug(entry) {
@@ -1890,7 +1917,73 @@ ${renderHandoffsByPlatformHtml(handoffs, req)}`;
   );
 });
 
-app.get("/admin/tools/view", (req, res) => {
+app.get("/admin/instagram-setup/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  const u = (path) => adminUrl(path, token);
+  const meta = await fetchPageInstagramStatus();
+  let subFields = "unknown";
+  let echoesOn = false;
+  try {
+    const subStatus = await getMessagingSubscriptionStatus();
+    subFields = [...extractSubscribedFieldsFromStatus(subStatus)].sort().join(", ") || "none";
+    echoesOn = hasMessageEchoesSubscription(subStatus);
+  } catch (_) {
+    /* show checklist anyway */
+  }
+
+  const igLabel =
+    meta.instagramLinked === true
+      ? meta.instagram?.username
+        ? `@${meta.instagram.username}`
+        : meta.instagram?.name || meta.instagram?.id || "linked"
+      : meta.instagramLinked === false
+        ? "not linked to Page token"
+        : "check Business Suite";
+
+  const webhookLine = webhookStats.lastPostAt
+    ? `Last POST <strong>${escapeHtml(webhookStats.lastPostAt)}</strong> · object=<code>${escapeHtml(String(webhookStats.lastObject || "—"))}</code> · total=${webhookStats.totalPosts}`
+    : `<strong class="alert-warn">No webhook POSTs since server started</strong> — Meta is not calling your Render URL yet.`;
+
+  const body = `<p class="muted">If <a href="${u("/admin/webhook-log")}">Webhook log</a> stays empty when someone IG DMs Beantol, the problem is Meta setup or Message Requests — not the AI.</p>
+${statCards({
+    "Webhook POSTs (session)": webhookStats.totalPosts,
+    "Page subscribed fields": subFields.split(",").length,
+    "message_echoes (Page API)": echoesOn ? "yes" : "no",
+    "Instagram link": igLabel,
+  })}
+<p class="muted">${webhookLine}</p>
+
+<h2>Checklist</h2>
+<ol style="line-height:1.8">
+<li><strong>Accept the DM</strong> — Business Suite → Instagram → <em>Requests</em> → Accept (non-followers often never hit the bot until accepted).</li>
+<li><strong>Meta Developer → Webhooks</strong> — Callback URL must be <code>https://beantol-bot.onrender.com/webhook</code> (same verify token as Render <code>VERIFY_TOKEN</code>).</li>
+<li><strong>Subscribe Instagram account</strong> — Under Webhooks, add your <strong>Instagram</strong> account (not only the Facebook Page) and enable <strong>messages</strong>.</li>
+<li><strong>App mode Live</strong> — In Development mode, only app testers receive webhooks. For real customers, app must be <strong>Live</strong> with <strong>instagram_manage_messages</strong> approved in App Review.</li>
+<li><strong>Re-subscribe Page</strong> — <a href="${u("/admin/subscribe-webhooks")}" target="_blank" rel="noopener">Open subscribe-webhooks</a> (JSON should show success).</li>
+<li><strong>Test again</strong> — Customer sends “hi” → refresh <a href="${u("/admin/webhook-log")}">Webhook log</a>. You should see <code>webhook_post object=instagram</code> and <code>inbound_message platform=instagram</code>.</li>
+</ol>
+
+<h2>What you should see when it works</h2>
+<table><tr><th>Step</th><th>Webhook log</th></tr>
+<tr><td>Customer IG DM</td><td><code>webhook_post · object=instagram · parsed=1</code></td></tr>
+<tr><td>Bot processes</td><td><code>inbound_message · instagram · sender=… · text=hi</code></td></tr>
+<tr><td>Bot replies</td><td><code>page_outbound · human=false · app_id=&lt;bot app&gt;</code></td></tr>
+</table>
+
+<p class="muted"><a href="${u("/admin/meta-status")}" target="_blank" rel="noopener">Meta / Instagram status (JSON)</a> · <a href="https://developers.facebook.com/" target="_blank" rel="noopener">Meta Developer</a></p>`;
+
+  res.type("html").send(
+    renderPage({
+      title: "Instagram setup",
+      active: "instagram",
+      token,
+      body,
+    })
+  );
+});
+
+app.get("/admin/tools/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const token = adminToken(req);
   const u = (path) => adminUrl(path, token);
@@ -2665,35 +2758,30 @@ app.get("/admin/webhook-log", (req, res) => {
     metaAppId: metaAppId || null,
     pageInboxAppId: META_PAGE_INBOX_APP_ID,
     pageId: pageId || PAGE_ID_ENV || null,
+    webhookStats: { ...webhookStats },
     events: [...webhookDebugLog].reverse(),
     hint:
-      "Reply as admin from Business Suite, then refresh. Human echoes should show app_id=26390203743090 and humanEcho=true.",
+      "Every Meta POST should show webhook_post. If empty after an IG DM, Meta is not reaching your server — see Instagram setup tab.",
   };
   if (req.query.format !== "json" && accept.includes("text/html") && !accept.includes("application/json")) {
     const rows = payload.events
       .map((e) => {
-        const detail = [
-          e.kind,
-          e.platform,
-          e.echo != null ? `echo=${e.echo}` : "",
-          e.appId ? `app_id=${e.appId}` : "",
-          e.humanEcho != null ? `human=${e.humanEcho}` : "",
-          e.customerId ? `customer=${e.customerId}` : "",
-          e.text ? `text=${e.text}` : "",
-        ]
-          .filter(Boolean)
-          .join(" · ");
-        return `<tr><td>${escapeHtml(e.at)}</td><td>${escapeHtml(detail)}</td></tr>`;
+        return `<tr><td>${escapeHtml(e.at)}</td><td>${escapeHtml(formatWebhookDebugDetail(e))}</td></tr>`;
       })
       .join("");
+    const statsLine = webhookStats.lastPostAt
+      ? `<p class="muted"><strong>Last webhook POST:</strong> ${escapeHtml(webhookStats.lastPostAt)} · object=<code>${escapeHtml(String(webhookStats.lastObject || "—"))}</code> · parsed events=${webhookStats.lastEventCount} · total POSTs=${webhookStats.totalPosts}</p>`
+      : `<div class="alert-warn"><strong>No webhook POSTs received</strong> since this server started. Meta is not hitting <code>/webhook</code> — check callback URL and Instagram subscription (<a href="${adminUrl("/admin/instagram-setup/view", token)}">Instagram setup</a>).</div>`;
     return res.type("html").send(
       renderPage({
         title: "Webhook debug log",
         active: "webhooks",
         token,
-        body: `<p class="muted">Last ${payload.count} webhook events (newest first). <a href="${adminUrl("/admin/webhook-log", token)}&format=json">JSON</a> · Reply as admin in Business Suite, then refresh.</p>
-<p class="muted">Bot app id: <code>${escapeHtml(String(payload.metaAppId || "unknown"))}</code> · Page Inbox app id: <code>${escapeHtml(payload.pageInboxAppId)}</code> · Human admin echoes: <code>human=true</code></p>
-${rows ? `<table><tr><th>Time (UTC)</th><th>Event</th></tr>${rows}</table>` : "<p>No events yet — send a test message.</p>"}`,
+        body: `${statsLine}
+<p class="muted">Newest first. <a href="${adminUrl("/admin/webhook-log", token)}&format=json">JSON</a></p>
+<p class="muted">Bot app id: <code>${escapeHtml(String(payload.metaAppId || "unknown"))}</code> · Page Inbox: <code>${escapeHtml(payload.pageInboxAppId)}</code></p>
+${rows ? `<table><tr><th>Time (UTC)</th><th>Event</th></tr>${rows}</table>` : "<p>No events in buffer yet.</p>"}
+<p class="muted">Expected for Instagram DM: <code>webhook_post object=instagram</code> then <code>inbound_message platform=instagram</code>. If you only see Messenger posts, IG webhook is not subscribed.</p>`,
       })
     );
   }
@@ -2810,8 +2898,22 @@ app.get("/webhook", (req, res) => {
 // --- Meta webhook: Facebook Page + Instagram DMs ---
 app.post("/webhook", (req, res) => {
   const body = req.body || {};
+  const parsedEvents = collectMessagingEvents(body);
+  webhookStats.totalPosts += 1;
+  webhookStats.lastPostAt = new Date().toISOString();
+  webhookStats.lastObject = body.object || null;
+  webhookStats.lastEventCount = parsedEvents.length;
+
+  recordWebhookDebug({
+    kind: "webhook_post",
+    object: body.object || "(missing)",
+    entryCount: body.entry?.length ?? 0,
+    eventCount: parsedEvents.length,
+    supported: isSupportedWebhookObject(body.object),
+  });
+
   console.log(
-    `Webhook POST received object="${body.object || "missing"}" entries=${body.entry?.length ?? 0}`
+    `Webhook POST received object="${body.object || "missing"}" entries=${body.entry?.length ?? 0} parsed=${parsedEvents.length}`
   );
 
   if (!isSupportedWebhookObject(body.object)) {
@@ -2920,14 +3022,47 @@ function collectMessagingEvents(body) {
       });
     }
     for (const change of entry.changes || []) {
-      if (change.field !== "messages") continue;
       const value = change.value;
       if (!value) continue;
+      if (change.field !== "messages" && change.field !== "messaging") {
+        recordWebhookDebug({
+          kind: "unhandled_change",
+          object: body.object,
+          field: change.field,
+          entryId: entry.id,
+        });
+        continue;
+      }
       if (Array.isArray(value.messaging)) {
         for (const event of value.messaging) {
           items.push({
             event,
             channel: "changes.messaging",
+            platform,
+            entryId: entry.id,
+          });
+        }
+      } else if (Array.isArray(value.messages)) {
+        for (const msg of value.messages) {
+          const from = msg.from || value.sender?.id;
+          if (!from) continue;
+          items.push({
+            event: {
+              sender: { id: String(from) },
+              recipient: { id: String(entry.id) },
+              timestamp: msg.timestamp,
+              message: {
+                mid: msg.id || msg.mid,
+                text:
+                  typeof msg.text === "object" && msg.text?.body
+                    ? msg.text.body
+                    : typeof msg.text === "string"
+                      ? msg.text
+                      : undefined,
+                attachments: msg.attachments,
+              },
+            },
+            channel: "changes.messages_array",
             platform,
             entryId: entry.id,
           });
@@ -3067,6 +3202,13 @@ async function handleStructuredFlows(senderId, userText, platform) {
 
 async function handleMessage(senderId, userText, platform = "messenger") {
   console.log(`Message from ${senderId} (${platformLabel(platform)}): ${userText}`);
+
+  recordWebhookDebug({
+    kind: "inbound_message",
+    platform,
+    sender: senderId,
+    text: String(userText).slice(0, 160),
+  });
 
   queueLogEvent({
     platform,
