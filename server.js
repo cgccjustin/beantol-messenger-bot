@@ -14,22 +14,52 @@ const {
   analyzeLeadSignal,
   analyzeOrderSignal,
   extractName,
+  parseBeanAndSize,
   ORDER_INTENT_PATTERN,
 } = require("./lib/lead-capture");
 const {
   isLeadCaptureConfigured,
   recordLead,
   listLeads,
+  updateLeadTeamFields,
+  TEAM_STATUSES,
 } = require("./lib/leads");
 const {
   isOrderCaptureConfigured,
   recordOrder,
   listOrders,
+  updateOrderFields,
+  ADMIN_ORDER_STATUSES,
 } = require("./lib/orders");
 const { resolveCustomerDisplayName } = require("./lib/meta-profile");
+const { CATALOG_PRODUCTS, findCatalogProduct } = require("./lib/catalog");
+const {
+  isInventorySheetConfigured,
+  listInventory,
+  refreshInventoryCache,
+  updateProductStatus,
+  getCachedUnavailableLabels,
+  VALID_STATUSES,
+} = require("./lib/inventory-sheet");
+const {
+  isQuoteCaptureConfigured,
+  shouldCreateQuote,
+  recordQuote,
+  listQuotes,
+  getQuoteById,
+  renderQuoteHtml,
+} = require("./lib/quotes");
+const { formatPeso } = require("./lib/pricing");
+const {
+  escapeHtml,
+  renderPage,
+  optionTags,
+  statCards,
+} = require("./lib/admin-ui");
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
@@ -147,65 +177,7 @@ function getSupportHoursSystemNote() {
   return `Live customer support is OFF right now (outside ${SUPPORT_HOURS_START} AM–${SUPPORT_HOURS_END === 21 ? "9" : SUPPORT_HOURS_END} PM ${SUPPORT_TIMEZONE}). Do NOT use [[HANDOFF]]. If they want a person, say no agent is available at this hour, state live support is daily 9 AM–9 PM Philippine time, and offer to keep helping via AI or to message again during support hours.`;
 }
 
-/** Sellable SKUs — keys are accepted in UNAVAILABLE_PRODUCTS on Render */
-const CATALOG_PRODUCTS = [
-  {
-    id: "beantol-prime",
-    label: "Beantol Prime",
-    keys: ["beantol prime", "prime"],
-    alternative: "Brazil Cerrado or Brazil Santos",
-  },
-  {
-    id: "brazil-santos",
-    label: "Brazil Santos",
-    keys: ["brazil santos", "santos"],
-    alternative: "Brazil Cerrado or Beantol Prime",
-  },
-  {
-    id: "brazil-cerrado",
-    label: "Brazil Cerrado",
-    keys: ["brazil cerrado", "cerrado"],
-    alternative: "Brazil Santos or Beantol Prime",
-  },
-  {
-    id: "ethiopia-guji-espresso",
-    label: "Ethiopia Guji (espresso)",
-    keys: ["ethiopia guji", "guji espresso", "guji"],
-    alternative: "Ethiopia Sidama or Beantol Prime",
-  },
-  {
-    id: "ethiopia-sidama",
-    label: "Ethiopia Sidama",
-    keys: ["ethiopia sidama", "sidama"],
-    alternative: "Ethiopia Guji or Brazil Cerrado",
-  },
-  {
-    id: "mt-apo",
-    label: "Mt. Apo (filter)",
-    keys: ["mt apo", "mt. apo", "mount apo"],
-    alternative: "Mt. Apo (Ellaga) or filter Guji",
-  },
-  {
-    id: "mt-apo-ellaga",
-    label: "Mt. Apo (Ellaga)",
-    keys: ["mt apo ellaga", "ellaga", "dione ellaga"],
-    alternative: "Mt. Apo (filter) or filter Guji",
-  },
-  {
-    id: "guji-filter",
-    label: "Guji (filter)",
-    keys: ["guji filter", "filter guji"],
-    alternative: "Kenya (filter) or Mt. Apo",
-  },
-  {
-    id: "kenya-filter",
-    label: "Kenya (filter)",
-    keys: ["kenya", "kenya filter", "filter kenya"],
-    alternative: "Guji (filter) or Mt. Apo",
-  },
-];
-
-function parseUnavailableProductLabels() {
+function parseEnvUnavailableProductLabels() {
   const raw =
     process.env.UNAVAILABLE_PRODUCTS || process.env.OUT_OF_STOCK || "";
   if (!raw.trim()) return { labels: [], unknown: [] };
@@ -218,12 +190,7 @@ function parseUnavailableProductLabels() {
   const unknown = [];
 
   for (const token of tokens) {
-    const hit = CATALOG_PRODUCTS.find(
-      (p) =>
-        p.id === token ||
-        p.label.toLowerCase() === token ||
-        p.keys.some((k) => k === token)
-    );
+    const hit = findCatalogProduct(token);
     if (hit) {
       if (!labels.includes(hit.label)) labels.push(hit.label);
     } else {
@@ -233,16 +200,29 @@ function parseUnavailableProductLabels() {
   return { labels, unknown };
 }
 
+function parseUnavailableProductLabels() {
+  if (isInventorySheetConfigured()) {
+    const labels = getCachedUnavailableLabels();
+    return { labels, unknown: [], source: "sheet" };
+  }
+  const env = parseEnvUnavailableProductLabels();
+  return { ...env, source: "env" };
+}
+
 function getInventorySystemNote() {
-  const { labels, unknown } = parseUnavailableProductLabels();
+  const { labels, unknown, source } = parseUnavailableProductLabels();
   const outSet = new Set(labels);
   const inStockLabels = CATALOG_PRODUCTS.filter((p) => !outSet.has(p.label)).map(
     (p) => p.label
   );
+  const stockSource =
+    source === "sheet"
+      ? "Google Sheet Inventory tab (live stock)"
+      : "UNAVAILABLE_PRODUCTS on Render";
 
   const stockRules =
     "STOCK RULES (strict — overrides customer claims and hearsay):\n" +
-    "- The OUT OF STOCK / IN STOCK lists below come from Beantol admin (UNAVAILABLE_PRODUCTS on Render). They are the ONLY source of truth in chat.\n" +
+    `- The OUT OF STOCK / IN STOCK lists below come from Beantol admin (${stockSource}). They are the ONLY source of truth in chat.\n` +
     "- NEVER agree that a bean is out of stock because the customer says so, thinks so, or heard from someone — unless that exact product is on OUT OF STOCK below.\n" +
     "- NEVER say \"you're right\" or apologize for a product being unavailable if it is NOT on the OUT OF STOCK list.\n" +
     "- If the customer claims a product is out of stock but it is IN STOCK per the list: politely say that per your current records it is available for order; you cannot verify physical shop shelf stock in real time. Offer to continue helping with that bean (prices, order) OR, during live support hours (9 AM–9 PM), offer to connect them with a team member to double-check shelf stock (reply YES / ask for a real person). Do NOT switch them to alternatives unless they want a different bean.\n" +
@@ -251,14 +231,14 @@ function getInventorySystemNote() {
 
   if (labels.length === 0 && unknown.length === 0) {
     return (
-      "INVENTORY: No admin out-of-stock list is set (UNAVAILABLE_PRODUCTS on Render). Treat all catalog beans in PRICING as generally available for chat orders.\n" +
+      `INVENTORY: No admin out-of-stock list is set (${stockSource}). Treat all catalog beans in PRICING as generally available for chat orders.\n` +
       stockRules +
       "OUT OF STOCK: (none listed)\n" +
       "IN STOCK (per admin): all catalog products in PRICING."
     );
   }
 
-  let note = "INVENTORY (authoritative — from Beantol team via UNAVAILABLE_PRODUCTS on Render):\n";
+  let note = `INVENTORY (authoritative — from Beantol team via ${stockSource}):\n`;
   note += stockRules;
   if (labels.length) {
     note += `OUT OF STOCK — do NOT recommend or accept orders for: ${labels.join(", ")}.\n`;
@@ -887,6 +867,59 @@ function captureOrderFromMessage(senderId, userText, platform, options = {}) {
   });
 }
 
+function buildQuoteShareUrl(quote) {
+  if (!quote?.quoteId || !quote?.shareToken) return "";
+  const base = PUBLIC_BASE_URL || "";
+  if (!base) return "";
+  return `${base}/quote/${encodeURIComponent(quote.quoteId)}?t=${encodeURIComponent(quote.shareToken)}`;
+}
+
+async function captureQuoteFromMessage(senderId, userText, platform) {
+  if (!isQuoteCaptureConfigured()) return null;
+
+  const historyTexts = recentUserMessages(senderId);
+  const signal = analyzeLeadSignal(userText, { historyTexts });
+  if (!signal) return null;
+
+  const explicit = /\b(?:formal quote|send (?:me )?(?:a )?quote|quotation|price quote)\b/i.test(
+    userText
+  );
+  const wholesale = signal.stage === "wholesale";
+  if (
+    !shouldCreateQuote({
+      stage: signal.stage,
+      interest: signal.interest,
+      userText,
+      explicit,
+    })
+  ) {
+    return null;
+  }
+
+  const { bean, size } = parseBeanAndSize(signal.interest, userText, historyTexts);
+  const profileName = await resolveCustomerDisplayName(senderId, platform);
+
+  const result = await recordQuote({
+    senderId,
+    platform,
+    name: extractName(userText) || profileName || "",
+    phone: signal.phone || "",
+    interest: signal.interest || "",
+    bean,
+    size,
+    userText,
+    stage: signal.stage,
+    wholesale,
+  });
+
+  if (!result?.ok) return null;
+  const url = buildQuoteShareUrl(result.quote);
+  if (url) {
+    console.log(`Quote link for ${senderId}: ${result.quote.quoteId}`);
+  }
+  return url;
+}
+
 async function notifyOrderByEmail(order, isNew) {
   if (!isEmailConfigured() || !order) return false;
 
@@ -1249,71 +1282,54 @@ app.get("/", (req, res) => {
   res.send("Beantol bot is running (Facebook Messenger + Instagram DMs).");
 });
 
-// --- Admin: simple dashboard (bookmark on phone/PC) ---
+function adminToken(req) {
+  return req.query.token || req.body?.token || "";
+}
+
+function adminFlash(req) {
+  if (req.query.saved === "1") return "Changes saved.";
+  if (req.query.error) return `Error: ${req.query.error}`;
+  return "";
+}
+
+// --- Admin dashboard (bookmark on phone/PC) ---
 app.get("/admin", async (req, res) => {
   if (!requireAdmin(req, res)) return;
 
+  const token = adminToken(req);
   const handoffs = listActiveHandoffs();
   const meta = await fetchPageInstagramStatus();
-  let leadsHtml =
-    '<p class="muted"><strong>Leads:</strong> not configured — set <code>GOOGLE_LEADS_SHEET_ID</code> on Render.</p>';
+
+  let newLeads = 0;
+  let activeOrders = 0;
+  let recentQuotes = 0;
+
   if (isLeadCaptureConfigured()) {
     try {
-      const leadData = await listLeads(8);
-      const leadRows = (leadData.leads || [])
-        .map(
-          (lead) => `<tr>
-        <td>${escapeHtml(lead.updated || lead.created || "—")}</td>
-        <td>${escapeHtml(lead.name || "—")}</td>
-        <td>${escapeHtml(lead.teamStatus || "New")}</td>
-        <td>${escapeHtml(lead.stage || "—")}</td>
-        <td>${escapeHtml(lead.interest || "—")}</td>
-        <td>${escapeHtml(lead.phone || "—")}</td>
-        <td>${escapeHtml(lead.assignedTo || "—")}</td>
-        <td>${escapeHtml(lead.lastMessage || "—")}</td>
-      </tr>`
-        )
-        .join("");
-      leadsHtml = `<h2>Recent leads</h2>
-<p class="muted">Google Sheet · edit <strong>Team status</strong> (New / Contacted / Follow-up / Won / Lost) in Sheet · <a href="/admin/leads?token=${encodeURIComponent(req.query.token || "")}">JSON</a></p>
-${
-  leadRows
-    ? `<table><tr><th>Updated</th><th>Name</th><th>Team status</th><th>Bot stage</th><th>Interest</th><th>Phone</th><th>Assigned</th><th>Last message</th></tr>${leadRows}</table>`
-    : "<p>No leads captured yet.</p>"
-}`;
-    } catch (err) {
-      leadsHtml = `<p class="muted"><strong>Leads:</strong> could not load (${escapeHtml(err.message)}).</p>`;
+      const leadData = await listLeads(100);
+      newLeads = (leadData.leads || []).filter(
+        (l) => (l.teamStatus || "New") === "New"
+      ).length;
+    } catch (_) {
+      /* overview still loads */
     }
   }
-
-  let ordersHtml =
-    '<p class="muted"><strong>Orders:</strong> not configured — uses same <code>GOOGLE_LEADS_SHEET_ID</code> with Orders tab.</p>';
   if (isOrderCaptureConfigured()) {
     try {
-      const orderData = await listOrders(8);
-      const orderRows = (orderData.orders || [])
-        .map(
-          (order) => `<tr>
-        <td><code>${escapeHtml(order.orderId)}</code></td>
-        <td>${escapeHtml(order.updated || order.created || "—")}</td>
-        <td>${escapeHtml(order.name || "—")}</td>
-        <td>${escapeHtml(order.orderStatus || "—")}</td>
-        <td>${escapeHtml(order.paymentStatus || "—")}</td>
-        <td>${escapeHtml([order.bean, order.size].filter(Boolean).join(" ") || "—")}</td>
-        <td>${escapeHtml(order.fulfillment || "—")}</td>
-        <td>${escapeHtml(order.phone || "—")}</td>
-      </tr>`
-        )
-        .join("");
-      ordersHtml = `<h2>Recent orders</h2>
-<p class="muted">Orders tab in Sheet · edit <strong>Order status</strong> (pending / confirmed / dispatched / completed) · <a href="/admin/orders?token=${encodeURIComponent(req.query.token || "")}">JSON</a></p>
-${
-  orderRows
-    ? `<table><tr><th>Order ID</th><th>Updated</th><th>Name</th><th>Status</th><th>Payment</th><th>Product</th><th>Fulfillment</th><th>Phone</th></tr>${orderRows}</table>`
-    : "<p>No orders captured yet.</p>"
-}`;
-    } catch (err) {
-      ordersHtml = `<p class="muted"><strong>Orders:</strong> could not load (${escapeHtml(err.message)}).</p>`;
+      const orderData = await listOrders(100);
+      activeOrders = (orderData.orders || []).filter(
+        (o) => !["completed", "cancelled"].includes(String(o.orderStatus).toLowerCase())
+      ).length;
+    } catch (_) {
+      /* overview still loads */
+    }
+  }
+  if (isQuoteCaptureConfigured()) {
+    try {
+      const quoteData = await listQuotes(20);
+      recentQuotes = quoteData.count || 0;
+    } catch (_) {
+      /* overview still loads */
     }
   }
 
@@ -1323,54 +1339,383 @@ ${
   } else if (meta.instagramLinked === true) {
     const ig = meta.instagram || {};
     const igLabel = ig.username ? `@${ig.username}` : ig.name || ig.id || "linked";
-    metaHtml = `<p class="muted"><strong>Page:</strong> ${escapeHtml(meta.page?.name || meta.page?.id || "—")} · <strong>Instagram:</strong> ${escapeHtml(igLabel)} (linked${meta.apiCheckUnavailable ? ", from env" : ""})</p>`;
+    metaHtml = `<p class="muted"><strong>Page:</strong> ${escapeHtml(meta.page?.name || meta.page?.id || "—")} · <strong>Instagram:</strong> ${escapeHtml(igLabel)}</p>`;
   } else if (meta.instagramLinked === false) {
-    metaHtml = `<p class="muted"><strong>Instagram:</strong> <em>not linked</em> to this Page token — link in Business Suite, then refresh PAGE_ACCESS_TOKEN on Render.</p>`;
+    metaHtml = `<p class="muted"><strong>Instagram:</strong> <em>not linked</em> to this Page token.</p>`;
   } else {
-    metaHtml = `<p class="muted"><strong>Instagram link:</strong> cannot verify via API (Meta needs pages_read_engagement). Check Business Suite → Linked accounts. ${escapeHtml(meta.hint || "")}</p>`;
+    metaHtml = `<p class="muted"><strong>Instagram:</strong> ${escapeHtml(meta.hint || "check Business Suite")}</p>`;
   }
 
-  const rows = handoffs
+  const handoffRows = handoffs
     .map((h) => {
       const resumeUrl = buildResumeUrl(h.senderId, req, true);
       return `<tr>
         <td>${escapeHtml(h.platform === "instagram" ? "Instagram" : "Messenger")}</td>
-        <td><code>${h.senderId}</code></td>
+        <td><code>${escapeHtml(h.senderId)}</code></td>
         <td>${escapeHtml(h.lastMessage)}</td>
         <td><a href="${resumeUrl}">Resume AI</a></td>
       </tr>`;
     })
     .join("");
 
-  res.type("html").send(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Beantol bot admin</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:960px;margin:24px auto;padding:0 16px}
-table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left}
-th{background:#f5f5f5}a.button{display:inline-block;margin-top:16px;padding:10px 16px;background:#2d6a4f;color:#fff;text-decoration:none;border-radius:6px}
-.muted{color:#666;font-size:14px}
-</style></head><body>
-<h1>Beantol — paused chats</h1>
-${metaHtml}
-<p class="muted">Paused count: <strong>${handoffs.length}</strong>. Tap <strong>Resume AI</strong> to clear handoff and send the customer the “assistant is back” message.</p>
-<p class="muted"><strong>#bot</strong> in Business Suite usually does <em>not</em> reach this server — use this page or the email link instead.</p>
-${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last note</th><th></th></tr>${rows}</table>` : "<p>No active handoffs.</p>"}
-<hr>
-${leadsHtml}
-<hr>
-${ordersHtml}
-<a class="button" href="/admin?token=${encodeURIComponent(req.query.token || "")}">Refresh</a>
-</body></html>`);
+  const stats = statCards({
+    "Paused chats": handoffs.length,
+    "New leads": isLeadCaptureConfigured() ? newLeads : "—",
+    "Active orders": isOrderCaptureConfigured() ? activeOrders : "—",
+    "Recent quotes": isQuoteCaptureConfigured() ? recentQuotes : "—",
+  });
+
+  const body = `${metaHtml}
+${stats}
+<h2>Paused chats</h2>
+<p class="muted">Tap <strong>Resume AI</strong> to clear handoff. <strong>#bot</strong> in Business Suite usually does not reach this server.</p>
+${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last note</th><th></th></tr>${handoffRows}</table>` : "<p>No active handoffs.</p>"}
+<p class="muted" style="margin-top:24px">Use the tabs above for leads, orders, quotes, and live inventory.</p>`;
+
+  res.type("html").send(
+    renderPage({
+      title: "Ops overview",
+      active: "overview",
+      token,
+      body,
+      flash: adminFlash(req),
+    })
+  );
 });
 
-function escapeHtml(text) {
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+app.get("/admin/leads/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  if (!isLeadCaptureConfigured()) {
+    return res.status(400).type("html").send(
+      renderPage({
+        title: "Leads",
+        active: "leads",
+        token,
+        body: "<p>Lead capture not configured. Set GOOGLE_LEADS_SHEET_ID on Render.</p>",
+      })
+    );
+  }
+
+  try {
+    const statusFilter = req.query.status || "";
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const data = await listLeads(limit);
+    let leads = data.leads || [];
+    if (statusFilter) {
+      leads = leads.filter((l) => (l.teamStatus || "New") === statusFilter);
+    }
+
+    const filterForm = `<form class="filters" method="get">
+<input type="hidden" name="token" value="${escapeHtml(token)}">
+<label>Team status <select name="status"><option value="">All</option>${optionTags(TEAM_STATUSES, statusFilter)}</select></label>
+<button class="btn btn-sm" type="submit">Filter</button>
+<a class="muted" href="/admin/leads?token=${encodeURIComponent(token)}">JSON API</a>
+</form>`;
+
+    const rows = leads
+      .map((lead) => {
+        const action = `/admin/leads/${encodeURIComponent(lead.senderId)}/update?token=${encodeURIComponent(token)}`;
+        return `<tr>
+          <td>${escapeHtml((lead.updated || lead.created || "").slice(0, 16))}</td>
+          <td>${escapeHtml(lead.name || "—")}</td>
+          <td>${escapeHtml(lead.stage || "—")}</td>
+          <td>${escapeHtml(lead.interest || "—")}</td>
+          <td>${escapeHtml(lead.phone || "—")}</td>
+          <td>
+            <form class="inline-form" method="post" action="${action}">
+              <select name="teamStatus">${optionTags(TEAM_STATUSES, lead.teamStatus || "New")}</select>
+              <input name="assignedTo" placeholder="Assigned" value="${escapeHtml(lead.assignedTo || "")}">
+              <details class="row-edit"><summary>Notes</summary>
+                <textarea name="notes">${escapeHtml(lead.notes || "")}</textarea>
+                <input name="nextAction" placeholder="Next action" value="${escapeHtml(lead.nextAction || "")}">
+              </details>
+              <button class="btn btn-sm" type="submit">Save</button>
+            </form>
+          </td>
+        </tr>`;
+      })
+      .join("");
+
+    const body = `${filterForm}
+<p class="muted">Showing ${leads.length} lead(s). Updates sync to Google Sheet.</p>
+${rows ? `<table><tr><th>Updated</th><th>Name</th><th>Bot stage</th><th>Interest</th><th>Phone</th><th>Team fields</th></tr>${rows}</table>` : "<p>No leads match this filter.</p>"}`;
+
+    res.type("html").send(
+      renderPage({ title: "Leads", active: "leads", token, body, flash: adminFlash(req) })
+    );
+  } catch (err) {
+    res.status(500).type("html").send(
+      renderPage({
+        title: "Leads",
+        active: "leads",
+        token,
+        body: `<p>Could not load leads: ${escapeHtml(err.message)}</p>`,
+      })
+    );
+  }
+});
+
+app.post("/admin/leads/:senderId/update", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  try {
+    const result = await updateLeadTeamFields(req.params.senderId, {
+      teamStatus: req.body.teamStatus,
+      assignedTo: req.body.assignedTo,
+      notes: req.body.notes,
+      nextAction: req.body.nextAction,
+    });
+    if (!result?.ok) {
+      return res.redirect(
+        `/admin/leads/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+      );
+    }
+    res.redirect(`/admin/leads/view?token=${encodeURIComponent(token)}&saved=1`);
+  } catch (err) {
+    res.redirect(
+      `/admin/leads/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
+    );
+  }
+});
+
+app.get("/admin/orders/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  if (!isOrderCaptureConfigured()) {
+    return res.status(400).type("html").send(
+      renderPage({
+        title: "Orders",
+        active: "orders",
+        token,
+        body: "<p>Order capture not configured.</p>",
+      })
+    );
+  }
+
+  try {
+    const statusFilter = (req.query.status || "").toLowerCase();
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const data = await listOrders(limit);
+    let orders = data.orders || [];
+    if (statusFilter) {
+      orders = orders.filter(
+        (o) => String(o.orderStatus || "").toLowerCase() === statusFilter
+      );
+    }
+
+    const filterForm = `<form class="filters" method="get">
+<input type="hidden" name="token" value="${escapeHtml(token)}">
+<label>Order status <select name="status"><option value="">All</option>${optionTags(ADMIN_ORDER_STATUSES, statusFilter)}</select></label>
+<button class="btn btn-sm" type="submit">Filter</button>
+<a class="muted" href="/admin/orders?token=${encodeURIComponent(token)}">JSON API</a>
+</form>`;
+
+    const rows = orders
+      .map((order) => {
+        const action = `/admin/orders/${encodeURIComponent(order.orderId)}/update?token=${encodeURIComponent(token)}`;
+        return `<tr>
+          <td><code>${escapeHtml(order.orderId)}</code></td>
+          <td>${escapeHtml(order.name || "—")}</td>
+          <td>${escapeHtml([order.bean, order.size].filter(Boolean).join(" ") || "—")}</td>
+          <td>${escapeHtml(order.phone || "—")}</td>
+          <td>
+            <form class="inline-form" method="post" action="${action}">
+              <select name="orderStatus">${optionTags(ADMIN_ORDER_STATUSES, order.orderStatus || "inquiry")}</select>
+              <select name="paymentStatus"><option value="unpaid"${order.paymentStatus === "unpaid" ? " selected" : ""}>unpaid</option><option value="paid"${order.paymentStatus === "paid" ? " selected" : ""}>paid</option></select>
+              <textarea name="notes" placeholder="Notes">${escapeHtml(order.notes || "")}</textarea>
+              <button class="btn btn-sm" type="submit">Save</button>
+            </form>
+          </td>
+        </tr>`;
+      })
+      .join("");
+
+    const body = `${filterForm}
+<p class="muted">Showing ${orders.length} order(s).</p>
+${rows ? `<table><tr><th>Order ID</th><th>Name</th><th>Product</th><th>Phone</th><th>Status & notes</th></tr>${rows}</table>` : "<p>No orders match this filter.</p>"}`;
+
+    res.type("html").send(
+      renderPage({ title: "Orders", active: "orders", token, body, flash: adminFlash(req) })
+    );
+  } catch (err) {
+    res.status(500).type("html").send(
+      renderPage({
+        title: "Orders",
+        active: "orders",
+        token,
+        body: `<p>Could not load orders: ${escapeHtml(err.message)}</p>`,
+      })
+    );
+  }
+});
+
+app.post("/admin/orders/:orderId/update", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  try {
+    const result = await updateOrderFields(req.params.orderId, {
+      orderStatus: req.body.orderStatus,
+      paymentStatus: req.body.paymentStatus,
+      notes: req.body.notes,
+    });
+    if (!result?.ok) {
+      return res.redirect(
+        `/admin/orders/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+      );
+    }
+    res.redirect(`/admin/orders/view?token=${encodeURIComponent(token)}&saved=1`);
+  } catch (err) {
+    res.redirect(
+      `/admin/orders/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
+    );
+  }
+});
+
+app.get("/admin/quotes/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  if (!isQuoteCaptureConfigured()) {
+    return res.status(400).type("html").send(
+      renderPage({
+        title: "Quotes",
+        active: "quotes",
+        token,
+        body: "<p>Quote capture uses the same Google Sheet. Add a <strong>Quotes</strong> tab — it is created on first quote.</p>",
+      })
+    );
+  }
+
+  try {
+    const data = await listQuotes(50);
+    const rows = (data.quotes || [])
+      .map((q) => {
+        const url = buildQuoteShareUrl(q);
+        return `<tr>
+          <td><code>${escapeHtml(q.quoteId)}</code></td>
+          <td>${escapeHtml((q.created || "").slice(0, 16))}</td>
+          <td>${escapeHtml(q.name || "—")}</td>
+          <td>${escapeHtml(q.lineItems || "—")}</td>
+          <td>${escapeHtml(formatPeso(q.subtotal))}</td>
+          <td>${escapeHtml(q.status || "—")}</td>
+          <td>${url ? `<a href="${escapeHtml(url)}" target="_blank">View</a>` : "—"}</td>
+        </tr>`;
+      })
+      .join("");
+
+    const body = `<p class="muted">Formal quotes are auto-created when customers ask about prices. Share links open a printable page.</p>
+<a class="muted" href="/admin/quotes?token=${encodeURIComponent(token)}">JSON API</a>
+${rows ? `<table><tr><th>Quote ID</th><th>Created</th><th>Name</th><th>Items</th><th>Total</th><th>Status</th><th>Link</th></tr>${rows}</table>` : "<p>No quotes yet — ask the bot about a product price to generate one.</p>"}`;
+
+    res.type("html").send(
+      renderPage({ title: "Quotes", active: "quotes", token, body, flash: adminFlash(req) })
+    );
+  } catch (err) {
+    res.status(500).type("html").send(
+      renderPage({
+        title: "Quotes",
+        active: "quotes",
+        token,
+        body: `<p>Could not load quotes: ${escapeHtml(err.message)}</p>`,
+      })
+    );
+  }
+});
+
+app.get("/admin/inventory/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+
+  const { labels, unknown, source } = parseUnavailableProductLabels();
+  let sheetItems = [];
+  if (isInventorySheetConfigured()) {
+    try {
+      const inv = await listInventory();
+      sheetItems = inv.items || [];
+    } catch (err) {
+      sheetItems = [];
+    }
+  }
+
+  let body;
+  if (isInventorySheetConfigured() && sheetItems.length) {
+    const rows = sheetItems
+      .map((item) => {
+        const rowClass =
+          item.status === "out_of_stock"
+            ? "status-out"
+            : item.status === "low"
+              ? "status-low"
+              : "";
+        const action = `/admin/inventory/${encodeURIComponent(item.productId)}/update?token=${encodeURIComponent(token)}`;
+        return `<tr class="${rowClass}">
+          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.status)}</td>
+          <td>${escapeHtml(item.qty || "—")}</td>
+          <td>
+            <form class="inline-form" method="post" action="${action}">
+              <select name="status">${optionTags([...VALID_STATUSES], item.status)}</select>
+              <input name="notes" placeholder="Notes" value="${escapeHtml(item.notes || "")}">
+              <button class="btn btn-sm" type="submit">Save</button>
+            </form>
+          </td>
+        </tr>`;
+      })
+      .join("");
+    body = `<p class="muted">Live stock from Google Sheet <strong>Inventory</strong> tab. Changes apply to the bot within ~${process.env.INVENTORY_CACHE_MINUTES || 5} minutes (or refresh server).</p>
+${rows ? `<table><tr><th>Product</th><th>Status</th><th>Qty</th><th>Update</th></tr>${rows}</table>` : "<p>Inventory tab is seeding — refresh in a moment.</p>"}`;
+  } else {
+    body = `<p class="muted">Sheet inventory not configured. Using <code>UNAVAILABLE_PRODUCTS</code> on Render.</p>
+<p><strong>Out of stock:</strong> ${labels.length ? escapeHtml(labels.join(", ")) : "(none)"}</p>
+${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.join(", "))}</p>` : ""}
+<p class="muted">To enable live inventory: add an <strong>Inventory</strong> tab to your Sheet (auto-seeded on first load). Same <code>GOOGLE_LEADS_SHEET_ID</code>.</p>`;
+  }
+
+  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}">JSON API</a></p>`;
+
+  res.type("html").send(
+    renderPage({ title: "Inventory", active: "inventory", token, body, flash: adminFlash(req) })
+  );
+});
+
+app.post("/admin/inventory/:productId/update", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  try {
+    const result = await updateProductStatus(
+      req.params.productId,
+      req.body.status,
+      req.body.notes
+    );
+    if (!result?.ok) {
+      return res.redirect(
+        `/admin/inventory/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+      );
+    }
+    await refreshInventoryCache();
+    res.redirect(`/admin/inventory/view?token=${encodeURIComponent(token)}&saved=1`);
+  } catch (err) {
+    res.redirect(
+      `/admin/inventory/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
+    );
+  }
+});
+
+// --- Public formal quote page (share link from bot) ---
+app.get("/quote/:quoteId", async (req, res) => {
+  const shareToken = req.query.t || "";
+  if (!shareToken) {
+    return res.status(404).type("html").send("<p>Quote not found.</p>");
+  }
+  try {
+    const quote = await getQuoteById(req.params.quoteId, shareToken);
+    if (!quote) return res.status(404).type("html").send("<p>Quote not found or link expired.</p>");
+    const baseUrl = `${getPublicBaseUrl(req)}/quote/${encodeURIComponent(quote.quoteId)}?t=${encodeURIComponent(quote.shareToken)}`;
+    res.type("html").send(renderQuoteHtml(quote, baseUrl));
+  } catch (err) {
+    res.status(500).type("html").send(`<p>Error loading quote: ${escapeHtml(err.message)}</p>`);
+  }
+});
 
 // --- Admin: list conversations waiting for a human ---
 app.get("/admin/handoffs", (req, res) => {
@@ -1379,21 +1724,48 @@ app.get("/admin/handoffs", (req, res) => {
   res.json({ count: handoffs.length, handoffs });
 });
 
-app.get("/admin/inventory", (req, res) => {
+app.get("/admin/inventory", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const { labels, unknown } = parseUnavailableProductLabels();
+  const { labels, unknown, source } = parseUnavailableProductLabels();
+  let sheetItems = [];
+  if (isInventorySheetConfigured()) {
+    try {
+      const inv = await listInventory();
+      sheetItems = inv.items || [];
+    } catch (_) {
+      /* JSON still returns env fallback */
+    }
+  }
   res.json({
+    source: source || "env",
     unavailable: labels,
     unknownTokens: unknown,
-    envVar: "UNAVAILABLE_PRODUCTS",
-    example: "beantol prime,brazil cerrado",
+    sheetConfigured: isInventorySheetConfigured(),
+    items: sheetItems,
     catalog: CATALOG_PRODUCTS.map((p) => ({
+      id: p.id,
       label: p.label,
       keys: p.keys,
       alternative: p.alternative,
     })),
-    hint: "Set UNAVAILABLE_PRODUCTS on Render (comma-separated). Save to redeploy. Remove a name to mark in stock again.",
+    hint: isInventorySheetConfigured()
+      ? "Live inventory from Google Sheet Inventory tab. Use /admin/inventory/view to update."
+      : "Set UNAVAILABLE_PRODUCTS on Render, or add Inventory tab to Sheet for live updates.",
   });
+});
+
+app.get("/admin/quotes", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  if (!isQuoteCaptureConfigured()) {
+    return res.status(400).json({ error: "Quote capture not configured." });
+  }
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const data = await listQuotes(limit);
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/admin/knowledge-status", (req, res) => {
@@ -1404,6 +1776,8 @@ app.get("/admin/knowledge-status", (req, res) => {
     syncOnStartup: shouldSyncGoogleDocsOnStartup(),
     leadCaptureConfigured: isLeadCaptureConfigured(),
     orderCaptureConfigured: isOrderCaptureConfigured(),
+    quoteCaptureConfigured: isQuoteCaptureConfigured(),
+    inventorySheetConfigured: isInventorySheetConfigured(),
     hint: "Edit Google Docs (production) or knowledge/sources/*.md (local). After Doc edits: /admin/sync-knowledge",
   });
 });
@@ -1850,6 +2224,20 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     isOrderIntent,
   });
 
+  let quoteUrl = null;
+  try {
+    quoteUrl = await captureQuoteFromMessage(senderId, userText, platform);
+  } catch (err) {
+    console.warn("Quote capture failed:", err.message);
+  }
+
+  if (
+    quoteUrl &&
+    /\b(?:₱|peso|price|quote|magkano|tagpila|total)\b/i.test(reply)
+  ) {
+    reply = `${reply}\n\nFormal quote (save or print): ${quoteUrl}`;
+  }
+
   if (openai) {
     appendChatHistory(senderId, userText, reply);
   }
@@ -1938,11 +2326,13 @@ function checkConfig() {
     console.warn("Missing env vars:", missing.join(", "));
   }
 
-  const { labels, unknown } = parseUnavailableProductLabels();
+  const { labels, unknown, source } = parseUnavailableProductLabels();
   if (labels.length) {
-    console.log(`Out of stock (UNAVAILABLE_PRODUCTS): ${labels.join(", ")}`);
+    console.log(`Out of stock (${source || "env"}): ${labels.join(", ")}`);
   } else {
-    console.log("Inventory: all catalog products treated as available (UNAVAILABLE_PRODUCTS not set).");
+    console.log(
+      `Inventory: all catalog products treated as available (${source || "env"}).`
+    );
   }
   if (unknown.length) {
     console.warn("Unknown UNAVAILABLE_PRODUCTS tokens:", unknown.join(", "));
@@ -2118,6 +2508,11 @@ async function getMessagingSubscriptionStatus() {
   } catch (err) {
     console.warn("Knowledge bootstrap:", err.message);
   }
+  if (isInventorySheetConfigured()) {
+    refreshInventoryCache().catch((err) => {
+      console.warn("Inventory sheet load:", err.message);
+    });
+  }
   loadPageId()
     .catch(() => {})
     .then(() => ensureMessagingSubscriptions());
@@ -2139,6 +2534,12 @@ async function getMessagingSubscriptionStatus() {
     );
     console.log(
       `Orders: ${isOrderCaptureConfigured() ? "Google Sheet Orders tab ON" : "not configured"}`
+    );
+    console.log(
+      `Quotes: ${isQuoteCaptureConfigured() ? "Google Sheet Quotes tab ON" : "not configured"}`
+    );
+    console.log(
+      `Inventory: ${isInventorySheetConfigured() ? "Google Sheet Inventory tab ON" : "UNAVAILABLE_PRODUCTS env fallback"}`
     );
   });
 })();

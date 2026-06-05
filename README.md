@@ -165,9 +165,21 @@ Handoff state is stored in memory — a server **restart** clears pauses. After 
 
 ---
 
-## 7. Admin: list / clear handoffs
+## 7. Admin ops dashboard
 
-**Recommended:** send `#bot` from Business Suite in that conversation (see section 6).
+**Bookmark on phone/PC:**
+
+```http
+GET https://YOUR_SERVER/admin?token=YOUR_ADMIN_SECRET
+```
+
+Tabs: **Overview** (handoffs + stats), **Leads** (team status, assigned, notes), **Orders** (status, payment, notes), **Quotes** (formal `QT-*` links), **Inventory** (live stock from Sheet).
+
+**Formal quotes:** when a customer asks about prices, the bot may append a link like `/quote/QT-…?t=…` — printable page, also listed under Quotes.
+
+**Live inventory:** add an **Inventory** tab to your Google Sheet (auto-seeded). Toggle in/out of stock at `/admin/inventory/view` — no Render redeploy. Falls back to `UNAVAILABLE_PRODUCTS` env if the tab is not used.
+
+**Handoffs — recommended:** send `#bot` from Business Suite in that conversation (see section 6).
 
 **Alternative (browser / curl):** replace `YOUR_SERVER` and `YOUR_ADMIN_SECRET` with your values.
 
