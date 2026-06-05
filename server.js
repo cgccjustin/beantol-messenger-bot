@@ -933,6 +933,13 @@ function recentUserMessages(senderId, limit = 5) {
     .slice(-limit);
 }
 
+function getConversationTextsForQuote(senderId, limit = 16) {
+  return getChatHistory(senderId)
+    .slice(-limit)
+    .map((message) => message.content)
+    .filter(Boolean);
+}
+
 function queueLeadCapture(payload) {
   if (!isLeadCaptureConfigured()) return;
 
@@ -1023,8 +1030,8 @@ function buildQuoteShareUrl(quote) {
 async function captureQuoteFromMessage(senderId, userText, platform, assistantReply = "") {
   if (!isQuoteCaptureConfigured()) return null;
 
-  const historyTexts = recentUserMessages(senderId, 8);
-  const signal = analyzeLeadSignal(userText, { historyTexts });
+  const historyTexts = getConversationTextsForQuote(senderId, 16);
+  const signal = analyzeLeadSignal(userText, { historyTexts: recentUserMessages(senderId, 8) });
   if (!signal) return null;
 
   if (isAffirmativeWithoutSize(userText) && lastAssistantAskedForSize(senderId)) {
@@ -2754,7 +2761,9 @@ async function handleMessage(senderId, userText, platform = "messenger") {
 
   if (
     quoteUrl &&
-    /\b(?:₱|peso|price|quote|magkano|tagpila|total)\b/i.test(reply)
+    /\b(?:₱|peso|price|quote|magkano|tagpila|total|summary|updated order|your order)\b/i.test(
+      reply
+    )
   ) {
     reply = `${reply}\n\nFormal quote (save or print): ${quoteUrl}`;
   }
