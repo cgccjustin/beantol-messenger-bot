@@ -908,10 +908,10 @@ function buildQuoteShareUrl(quote) {
   return `${base}/quote/${encodeURIComponent(quote.quoteId)}?t=${encodeURIComponent(quote.shareToken)}`;
 }
 
-async function captureQuoteFromMessage(senderId, userText, platform) {
+async function captureQuoteFromMessage(senderId, userText, platform, assistantReply = "") {
   if (!isQuoteCaptureConfigured()) return null;
 
-  const historyTexts = recentUserMessages(senderId);
+  const historyTexts = recentUserMessages(senderId, 8);
   const signal = analyzeLeadSignal(userText, { historyTexts });
   if (!signal) return null;
 
@@ -942,6 +942,8 @@ async function captureQuoteFromMessage(senderId, userText, platform) {
     bean,
     size,
     userText,
+    historyTexts,
+    assistantReply,
     stage: signal.stage,
     wholesale,
   });
@@ -2617,7 +2619,7 @@ async function handleMessage(senderId, userText, platform = "messenger") {
 
   let quoteUrl = null;
   try {
-    quoteUrl = await captureQuoteFromMessage(senderId, userText, platform);
+    quoteUrl = await captureQuoteFromMessage(senderId, userText, platform, reply);
   } catch (err) {
     console.warn("Quote capture failed:", err.message);
   }
