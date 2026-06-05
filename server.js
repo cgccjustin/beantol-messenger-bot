@@ -8,6 +8,7 @@ const express = require("express");
 const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 const { SYSTEM_RULES } = require("./system-rules");
+const { formatPeso } = require("./lib/pricing");
 const rag = require("./lib/rag");
 const { syncGoogleDocs, isGoogleSyncConfigured } = require("./lib/google-docs-sync");
 const {
@@ -17,6 +18,7 @@ const {
   extractPhone,
   parseBeanAndSize,
   ORDER_INTENT_PATTERN,
+  ADD_TO_ORDER_PATTERN,
 } = require("./lib/lead-capture");
 const {
   isLeadCaptureConfigured,
@@ -77,7 +79,6 @@ const {
   getQuoteById,
   renderQuoteHtml,
 } = require("./lib/quotes");
-const { formatPeso } = require("./lib/pricing");
 const {
   escapeHtml,
   renderPage,
@@ -994,12 +995,17 @@ function queueOrderCapture(payload) {
 }
 
 function captureOrderFromMessage(senderId, userText, platform, options = {}) {
-  const historyTexts = recentUserMessages(senderId);
+  const historyTexts = getConversationTextsForQuote(senderId, 16);
+  const addToOrder =
+    ADD_TO_ORDER_PATTERN.test(userText) &&
+    Boolean(analyzeLeadSignal(userText, { historyTexts: recentUserMessages(senderId, 8) })?.interest);
   const isOrderIntent =
-    options.isOrderIntent || ORDER_INTENT_PATTERN.test(userText);
+    options.isOrderIntent ||
+    ORDER_INTENT_PATTERN.test(userText) ||
+    addToOrder;
   const signal = analyzeOrderSignal(userText, {
     ...options,
-    historyTexts,
+    historyTexts: recentUserMessages(senderId, 8),
     isOrderIntent,
   });
   if (!signal) return;
@@ -1016,6 +1022,9 @@ function captureOrderFromMessage(senderId, userText, platform, options = {}) {
     paymentStatus: signal.paymentStatus || "unpaid",
     orderStatus: signal.orderStatus || "inquiry",
     lastMessage: userText,
+    userText,
+    historyTexts,
+    assistantReply: options.assistantReply || "",
     trigger: signal.trigger,
   });
 }
@@ -1101,6 +1110,8 @@ async function notifyOrderByEmail(order, isNew) {
         `Payment: ${order.paymentStatus}`,
         `Bean: ${order.bean || "—"}`,
         `Size: ${order.size || "—"}`,
+        order.lineItems ? `Line items: ${order.lineItems}` : null,
+        order.subtotal ? `Subtotal: ₱${Number(order.subtotal).toLocaleString("en-PH")}` : null,
         `Fulfillment: ${order.fulfillment || "—"}`,
         `Platform: ${channel}`,
         `Sender ID: ${order.senderId}`,
@@ -1961,10 +1972,13 @@ ${archiveCheckbox("archived", showArchived, "Show completed / cancelled")}
     const rows = orders
       .map((order) => {
         const action = `/admin/orders/${encodeURIComponent(order.orderId)}/update?token=${encodeURIComponent(token)}`;
+        const productCell = order.lineItems
+          ? `<span style="font-size:13px">${escapeHtml(order.lineItems.replace(/ · /g, " · "))}</span>${order.subtotal ? `<br><strong>${escapeHtml(formatPeso(order.subtotal))}</strong>` : ""}`
+          : escapeHtml([order.bean, order.size].filter(Boolean).join(" ") || "—");
         return `<tr>
           <td><code>${escapeHtml(order.orderId)}</code></td>
           <td>${escapeHtml(order.name || "—")}</td>
-          <td>${escapeHtml([order.bean, order.size].filter(Boolean).join(" ") || "—")}</td>
+          <td>${productCell}</td>
           <td>${escapeHtml(order.phone || "—")}</td>
           <td>
             <form class="inline-form" method="post" action="${action}">
@@ -2747,17 +2761,24 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     deliveryTrigger,
   });
 
-  captureOrderFromMessage(senderId, userText, platform, {
-    isDeliveryDetails,
-    isOrderIntent,
-  });
-
   let quoteUrl = null;
   try {
     quoteUrl = await captureQuoteFromMessage(senderId, userText, platform, reply);
   } catch (err) {
     console.warn("Quote capture failed:", err.message);
   }
+
+  captureOrderFromMessage(senderId, userText, platform, {
+    isDeliveryDetails,
+    isOrderIntent:
+      ORDER_INTENT_PATTERN.test(userText) ||
+      (ADD_TO_ORDER_PATTERN.test(userText) &&
+        Boolean(
+          analyzeLeadSignal(userText, { historyTexts: recentUserMessages(senderId, 8) })
+            ?.interest
+        )),
+    assistantReply: reply,
+  });
 
   if (
     quoteUrl &&
