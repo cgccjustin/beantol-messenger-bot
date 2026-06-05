@@ -835,9 +835,29 @@ function isOutboundFromPage(event) {
   return false;
 }
 
+function isKnownBotOutboundText(text) {
+  const t = (text || "").trim();
+  if (!t) return false;
+  const known = [HANDOFF_REPLY, BOT_RESUME_REPLY, AFTER_HOURS_HANDOFF_REPLY].map((s) =>
+    String(s).trim()
+  );
+  if (known.includes(t)) return true;
+  if (/^got it — i am connecting you with our team/i.test(t)) return true;
+  if (/^our chat assistant is back on/i.test(t)) return true;
+  if (/^sorry — there is no customer support agent available/i.test(t)) return true;
+  if (/^noted — our team will follow up on your delivery/i.test(t)) return true;
+  return false;
+}
+
 /** Pause bot when a human admin replies from Business Suite (no extra customer message). */
 function pauseBotForAdminTakeover(customerId, adminText, platform = "messenger") {
   if (adminText && isAdminResumeCommand(adminText)) return;
+  if (adminText && isKnownBotOutboundText(adminText)) {
+    console.log(
+      `Page outbound ignored for ${customerId} — matches a known bot message (not admin takeover).`
+    );
+    return;
+  }
   activateAdminTakeover(customerId, adminText, platform);
   console.log(
     `Bot paused for ${customerId} (${platformLabel(platform)}) — admin message detected. Auto-replies off for ${HANDOFF_ADMIN_IDLE_MINUTES}m idle or until Resume AI / ${ADMIN_RESUME_COMMANDS[0]}.`
@@ -1249,7 +1269,7 @@ async function notifyAgentRequested(senderId, userText, source, platform = "mess
   console.log(
     `Human agent requested for ${senderId} (${source}, ${platformLabel(platform)}). AI still replies until an admin messages from Business Suite.`
   );
-  await sendMessage(senderId, HANDOFF_REPLY);
+  await sendMessageWithFallback(senderId, HANDOFF_REPLY);
   if (openai) appendChatHistory(senderId, userText, HANDOFF_REPLY);
   notifyHandoffByEmail(senderId, userText, platform).catch((err) => {
     console.error("Handoff email failed:", err.message);
@@ -1267,7 +1287,7 @@ async function attemptCustomerHandoff(
     console.log(
       `Customer handoff blocked for ${senderId} (${source}) — outside support hours (${SUPPORT_HOURS_START}:00–${SUPPORT_HOURS_END}:00 ${SUPPORT_TIMEZONE}).`
     );
-    await sendMessage(senderId, AFTER_HOURS_HANDOFF_REPLY);
+    await sendMessageWithFallback(senderId, AFTER_HOURS_HANDOFF_REPLY);
     if (openai) {
       appendChatHistory(senderId, userText, AFTER_HOURS_HANDOFF_REPLY);
     }
@@ -2657,7 +2677,7 @@ async function handleStructuredFlows(senderId, userText, platform) {
     if (appt.appointment) {
       await notifyAppointmentByEmail(appt.appointment);
     }
-    await sendMessage(senderId, sanitizeBotReply(appt.reply));
+    await sendMessageWithFallback(senderId, sanitizeBotReply(appt.reply));
     if (openai) appendChatHistory(senderId, userText, appt.reply);
     return true;
   }
@@ -2674,7 +2694,7 @@ async function handleStructuredFlows(senderId, userText, platform) {
       lastMessage: userText,
       trigger: "product recommender",
     });
-    await sendMessage(senderId, sanitizeBotReply(rec.reply));
+    await sendMessageWithFallback(senderId, sanitizeBotReply(rec.reply));
     if (openai) appendChatHistory(senderId, userText, rec.reply);
     return true;
   }
@@ -2711,15 +2731,22 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     const confirmMsg =
       "Noted — our team will follow up on your delivery. I can still help here with other questions.";
     await notifyDeliveryByEmail(senderId, userText, "delivery rep requested", platform);
-    await sendMessage(senderId, confirmMsg);
+    await sendMessageWithFallback(senderId, confirmMsg);
     if (openai) appendChatHistory(senderId, userText, confirmMsg);
     return;
   }
 
   if (wantsHumanHandoff(userText, senderId)) {
-    captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
-    await attemptCustomerHandoff(senderId, userText, "phrase match", platform);
-    return;
+    const existingHandoff = getHandoffSession(senderId);
+    if (existingHandoff?.mode === "agent_requested") {
+      console.log(
+        `Follow-up after agent request for ${senderId} — AI continues (team already notified).`
+      );
+    } else {
+      captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
+      await attemptCustomerHandoff(senderId, userText, "phrase match", platform);
+      return;
+    }
   }
 
   if (await handleStructuredFlows(senderId, userText, platform)) {
@@ -2768,6 +2795,14 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       if (filterSizeNote) {
         systemMessages.push({ role: "system", content: filterSizeNote });
       }
+      const pendingAgent = getHandoffSession(senderId);
+      if (pendingAgent?.mode === "agent_requested") {
+        systemMessages.push({
+          role: "system",
+          content:
+            "HANDOFF STATUS: This customer asked for a human agent and the team was emailed. No admin has taken over yet — keep answering their questions helpfully. Do NOT output [[HANDOFF]] again unless they explicitly say they cannot wait for a person.",
+        });
+      }
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
         messages: [...systemMessages, ...history, { role: "user", content: userText }],
@@ -2793,6 +2828,12 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       if (!reply) {
         reply =
           "Noted — our team will follow up on your delivery. I can still help here with other questions.";
+      }
+    } else if (getHandoffSession(senderId)?.mode === "agent_requested") {
+      reply = reply.replace(HANDOFF_MARKER, "").trim();
+      if (!reply) {
+        reply =
+          "Our team has been notified and will reply here soon. Meanwhile, what else can I help you with?";
       }
     } else {
       clearDeliveryAgentOfferPending(senderId);
@@ -2866,7 +2907,7 @@ async function handleMessage(senderId, userText, platform = "messenger") {
   }
 
   try {
-    await sendMessage(senderId, sanitizeBotReply(reply));
+    await sendMessageWithFallback(senderId, sanitizeBotReply(reply));
   } catch (err) {
     console.error(`Send failed for ${senderId} (${platformLabel(platform)}):`, err.message);
     throw err;
