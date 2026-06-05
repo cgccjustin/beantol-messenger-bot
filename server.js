@@ -81,7 +81,9 @@ const {
 } = require("./lib/quotes");
 const {
   escapeHtml,
+  adminUrl,
   renderPage,
+  renderToolCard,
   optionTags,
   statCards,
   archiveCheckbox,
@@ -1617,6 +1619,44 @@ function listActiveHandoffs() {
   return handoffs;
 }
 
+function handoffStatusLabel(h) {
+  return h.mode === "admin_active"
+    ? `Admin chatting (AI paused${h.expiresAt ? ` · resumes ~${h.expiresAt.slice(11, 16)} UTC` : ""})`
+    : "Awaiting you (AI still on)";
+}
+
+function renderHandoffsTableHtml(handoffs, req) {
+  if (!handoffs.length) return "";
+  const rows = handoffs
+    .map((h) => {
+      const resumeUrl = buildResumeUrl(h.senderId, req, true);
+      const channel = h.platform === "instagram" ? "Instagram" : "Messenger";
+      return `<tr>
+        <td>${escapeHtml(channel)}</td>
+        <td><code>${escapeHtml(h.senderId)}</code></td>
+        <td>${escapeHtml(handoffStatusLabel(h))}</td>
+        <td>${escapeHtml(h.lastMessage)}</td>
+        <td><a class="button btn-sm" href="${resumeUrl}">Resume AI</a></td>
+      </tr>`;
+    })
+    .join("");
+  return `<table><tr><th>Channel</th><th>Customer ID</th><th>Status</th><th>Last note</th><th></th></tr>${rows}</table>`;
+}
+
+function renderHandoffsByPlatformHtml(handoffs, req) {
+  const messenger = handoffs.filter((h) => h.platform !== "instagram");
+  const instagram = handoffs.filter((h) => h.platform === "instagram");
+  let html = `<h2>Messenger</h2>`;
+  html += messenger.length
+    ? renderHandoffsTableHtml(messenger, req)
+    : `<p class="muted">No active Messenger handoffs.</p>`;
+  html += `<h2 style="margin-top:28px">Instagram</h2>`;
+  html += instagram.length
+    ? renderHandoffsTableHtml(instagram, req)
+    : `<p class="muted">No active Instagram handoffs.</p>`;
+  return html;
+}
+
 async function graphGet(path, accessToken = PAGE_ACCESS_TOKEN) {
   const url = `https://graph.facebook.com/v19.0/${path}${path.includes("?") ? "&" : "?"}access_token=${accessToken}`;
   const response = await fetch(url);
@@ -1784,22 +1824,7 @@ app.get("/admin", async (req, res) => {
   const pausedCount = handoffs.filter((h) => h.aiPaused).length;
   const awaitingCount = handoffs.filter((h) => h.mode === "agent_requested").length;
 
-  const handoffRows = handoffs
-    .map((h) => {
-      const resumeUrl = buildResumeUrl(h.senderId, req, true);
-      const status =
-        h.mode === "admin_active"
-          ? `Admin chatting (AI paused${h.expiresAt ? ` · resumes ~${h.expiresAt.slice(11, 16)}` : ""})`
-          : "Awaiting you (AI still on)";
-      return `<tr>
-        <td>${escapeHtml(h.platform === "instagram" ? "Instagram" : "Messenger")}</td>
-        <td><code>${escapeHtml(h.senderId)}</code></td>
-        <td>${escapeHtml(status)}</td>
-        <td>${escapeHtml(h.lastMessage)}</td>
-        <td><a href="${resumeUrl}">Resume AI</a></td>
-      </tr>`;
-    })
-    .join("");
+  const handoffTable = renderHandoffsTableHtml(handoffs, req);
 
   const stats = statCards({
     "AI paused (admin)": pausedCount,
@@ -1813,11 +1838,9 @@ app.get("/admin", async (req, res) => {
 ${webhookSubHtml}
 ${lowStockAlert}
 ${stats}
-<p class="muted"><a href="/admin/analytics/view?token=${encodeURIComponent(token)}">Analytics dashboard →</a></p>
 <h2>Handoffs</h2>
-<p class="muted">AI keeps helping after a human request until <strong>you</strong> reply in Business Suite — then it pauses for ${HANDOFF_ADMIN_IDLE_MINUTES} minutes. Tap <strong>Resume AI</strong> to turn it back on early. <strong>#bot</strong> in Business Suite usually does not reach this server.</p>
-${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Status</th><th>Last note</th><th></th></tr>${handoffRows}</table>` : "<p>No active handoffs.</p>"}
-<p class="muted" style="margin-top:24px">Use the tabs above for leads, orders, quotes, and live inventory.</p>`;
+<p class="muted">AI keeps helping after a human request until <strong>you</strong> reply in Business Suite — then it pauses for ${HANDOFF_ADMIN_IDLE_MINUTES} minutes. Use the <strong>Handoffs</strong> tab for Messenger vs Instagram. <strong>Resume AI</strong> turns the bot back on early.</p>
+${handoffTable || "<p>No active handoffs.</p>"}`;
 
   res.type("html").send(
     renderPage({
@@ -1826,6 +1849,63 @@ ${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Status</
       token,
       body,
       flash: adminFlash(req),
+      bookmark: true,
+      req,
+    })
+  );
+});
+
+app.get("/admin/handoffs/view", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  const handoffs = listActiveHandoffs();
+  const pausedCount = handoffs.filter((h) => h.aiPaused).length;
+  const awaitingCount = handoffs.filter((h) => h.mode === "agent_requested").length;
+
+  const body = `${statCards({
+    "AI paused (admin)": pausedCount,
+    "Awaiting agent": awaitingCount,
+    "Messenger": handoffs.filter((h) => h.platform !== "instagram").length,
+    "Instagram": handoffs.filter((h) => h.platform === "instagram").length,
+  })}
+<p class="muted">Reply in <a href="https://business.facebook.com/latest/inbox" target="_blank" rel="noopener">Meta Business Suite inbox</a> to pause the bot. <strong>Resume AI</strong> sends the “assistant is back” message and clears the handoff for that customer.</p>
+${renderHandoffsByPlatformHtml(handoffs, req)}`;
+
+  res.type("html").send(
+    renderPage({
+      title: "Handoffs — Messenger & Instagram",
+      active: "handoffs",
+      token,
+      body,
+      flash: adminFlash(req),
+    })
+  );
+});
+
+app.get("/admin/tools/view", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  const u = (path) => adminUrl(path, token);
+
+  const body = `<p class="muted">API tools open in a new tab. Use the tabs above for day-to-day ops.</p>
+<div class="grid-2">
+${renderToolCard("Meta Business Suite inbox", "Reply to customers as the Page (Messenger + Instagram).", "https://business.facebook.com/latest/inbox", true)}
+${renderToolCard("Re-subscribe webhooks", "Register Page webhook fields (messages, message_echoes, etc.) with Meta.", u("/admin/subscribe-webhooks"), true)}
+${renderToolCard("Webhook debug log", "See recent echoes — human admin replies show human=true.", u("/admin/webhook-log"))}
+${renderToolCard("Test email", "Send a test alert to HANDOFF_NOTIFY_EMAIL.", u("/admin/test-email"), true)}
+${renderToolCard("Meta / Instagram status", "Check whether Instagram is linked to your Page token.", u("/admin/meta-status"), true)}
+${renderToolCard("Sync knowledge (Google Doc)", "Pull latest Q&A from Google Docs into the bot.", u("/admin/sync-knowledge"), true)}
+${renderToolCard("Reindex knowledge", "Rebuild search index from local + synced sources.", u("/admin/reindex-knowledge"), true)}
+${renderToolCard("Knowledge status", "See indexed chunks and last sync time.", u("/admin/knowledge-status"), true)}
+${renderToolCard("Handoffs JSON", "List active handoffs (API).", u("/admin/handoffs"), true)}
+</div>`;
+
+  res.type("html").send(
+    renderPage({
+      title: "Admin tools",
+      active: "tools",
+      token,
+      body,
     })
   );
 });
@@ -2601,12 +2681,11 @@ app.get("/admin/webhook-log", (req, res) => {
     return res.type("html").send(
       renderPage({
         title: "Webhook debug log",
-        active: "overview",
+        active: "webhooks",
         token,
-        body: `<p class="muted">Last ${payload.count} webhook events (newest first). <a href="/admin/webhook-log?token=${encodeURIComponent(token)}&format=json">JSON</a></p>
-<p class="muted">Bot app id: <code>${escapeHtml(String(payload.metaAppId || "unknown"))}</code> · Page Inbox app id: <code>${escapeHtml(payload.pageInboxAppId)}</code></p>
-${rows ? `<table><tr><th>Time (UTC)</th><th>Event</th></tr>${rows}</table>` : "<p>No events yet — send a test message.</p>"}
-<p class="muted"><a href="/admin?token=${encodeURIComponent(token)}">← Overview</a></p>`,
+        body: `<p class="muted">Last ${payload.count} webhook events (newest first). <a href="${adminUrl("/admin/webhook-log", token)}&format=json">JSON</a> · Reply as admin in Business Suite, then refresh.</p>
+<p class="muted">Bot app id: <code>${escapeHtml(String(payload.metaAppId || "unknown"))}</code> · Page Inbox app id: <code>${escapeHtml(payload.pageInboxAppId)}</code> · Human admin echoes: <code>human=true</code></p>
+${rows ? `<table><tr><th>Time (UTC)</th><th>Event</th></tr>${rows}</table>` : "<p>No events yet — send a test message.</p>"}`,
       })
     );
   }
