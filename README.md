@@ -202,21 +202,24 @@ curl -X POST "https://YOUR_SERVER/admin/handoffs/123456789/resolve?token=YOUR_AD
 
 ## 8. Update Q&A (no new App Review)
 
-Edit business facts in **`knowledge/sources/*.md`** or your **Google Doc**, then re-index:
+**Production (recommended):** Edit your **Google Doc**, save, then either wait for the next Render restart (auto-sync on startup) or run:
+
+`GET https://beantol-bot.onrender.com/admin/sync-knowledge?token=ADMIN_SECRET`
+
+No GitHub deploy needed for Doc-only changes.
+
+**Local / repo backup:** Template in `knowledge/templates/beantol-knowledge-base.md`. Dev-only `.md` files go in `knowledge/sources/` (not indexed when Google sync is configured).
 
 ```bash
-npm run index-knowledge
-# or after Google Doc edits:
-npm run sync-knowledge
+npm run sync-knowledge   # Google Docs + re-index
+npm run index-knowledge  # local sources only
 ```
-
-Or on production: `GET /admin/sync-knowledge?token=ADMIN_SECRET` (Google Docs) or `/admin/reindex-knowledge` (local files only).
 
 Behavior rules (handoff, delivery steps, formatting) stay in **`system-rules.js`**.
 
 See **`knowledge/README.md`** for Google Docs setup.
 
-Then push to GitHub and wait for Render to redeploy (~1–3 min). You do **not** need Meta App Review again for text-only changes.
+Push to GitHub only when **code** changes. Text-only Doc updates do **not** need Meta App Review again.
 
 ---
 
