@@ -343,6 +343,12 @@ const openai = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY })
   : null;
 
+function shouldSyncGoogleDocsOnStartup() {
+  if (!isGoogleSyncConfigured()) return false;
+  // Default ON when Google Docs are configured; set RAG_SYNC_ON_STARTUP=false to disable.
+  return process.env.RAG_SYNC_ON_STARTUP !== "false";
+}
+
 async function bootstrapKnowledge() {
   rag.loadIndex();
 
@@ -358,14 +364,24 @@ async function bootstrapKnowledge() {
     return;
   }
 
-  if (process.env.RAG_SYNC_ON_STARTUP === "true") {
+  if (shouldSyncGoogleDocsOnStartup()) {
     try {
       console.log("RAG: syncing Google Docs on startup...");
       await syncGoogleDocs();
       if (openai) await rag.rebuildIndex(openai);
+      return;
     } catch (err) {
       console.warn("RAG: startup Google sync failed:", err.message);
       rag.loadIndex();
+    }
+  }
+
+  if (!rag.isReady() && openai) {
+    try {
+      console.log("RAG: building index from knowledge/sources...");
+      await rag.rebuildIndex(openai);
+    } catch (err) {
+      console.warn("RAG: auto-index failed (bot uses source fallback):", err.message);
     }
   }
 }
@@ -1124,7 +1140,8 @@ app.get("/admin/knowledge-status", (req, res) => {
   res.json({
     ...rag.getIndexStatus(),
     googleSyncConfigured: isGoogleSyncConfigured(),
-    hint: "Edit knowledge/sources or Google Docs, then /admin/reindex-knowledge or /admin/sync-knowledge",
+    syncOnStartup: shouldSyncGoogleDocsOnStartup(),
+    hint: "Edit Google Docs (production) or knowledge/sources/*.md (local). After Doc edits: /admin/sync-knowledge",
   });
 });
 
@@ -1796,7 +1813,13 @@ async function getMessagingSubscriptionStatus() {
     console.log(`Beantol bot listening on port ${PORT}`);
     console.log(`Webhook URL path: /webhook (Facebook Page + Instagram)`);
     console.log(
-      `RAG: ${rag.isReady() ? "index loaded" : "source-file fallback until indexed"}`
+      `RAG: ${rag.isReady() ? "index loaded" : "source-file fallback until indexed"}${
+        isGoogleSyncConfigured()
+          ? shouldSyncGoogleDocsOnStartup()
+            ? " | Google Doc sync on startup: ON"
+            : " | Google Doc sync on startup: OFF (RAG_SYNC_ON_STARTUP=false)"
+          : ""
+      }`
     );
   });
 })();
