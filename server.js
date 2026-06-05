@@ -304,6 +304,9 @@ function getInventorySystemNote() {
 /** Facebook Page ID — used to detect admin messages when is_echo is missing */
 let pageId = null;
 
+/** Page / IG account IDs seen on outbound (echo) webhooks */
+const outboundSenderIds = new Set();
+
 /** Message IDs sent by this bot — used to ignore echoes of our own replies */
 const botSentMessageIds = new Set();
 const BOT_MID_MAX = 500;
@@ -818,21 +821,38 @@ function isAdminResumeCommand(text) {
   });
 }
 
-function rememberPageIdFromEvent(event) {
+function getOutboundSenderIds() {
+  const ids = new Set(outboundSenderIds);
+  if (pageId) ids.add(String(pageId));
+  if (PAGE_ID_ENV) ids.add(String(PAGE_ID_ENV));
+  if (INSTAGRAM_ACCOUNT_ID) ids.add(String(INSTAGRAM_ACCOUNT_ID));
+  return ids;
+}
+
+function rememberOutboundSenderFromEvent(event) {
   if (event.message?.is_echo !== true || !event.sender?.id) return;
-  const senderPageId = String(event.sender.id);
-  if (pageId !== senderPageId) {
-    pageId = senderPageId;
-    console.log(`Page ID learned from message echo: ${pageId}`);
+  const senderId = String(event.sender.id);
+  outboundSenderIds.add(senderId);
+  if (!pageId || pageId === senderId) {
+    if (pageId !== senderId) {
+      pageId = senderId;
+      console.log(`Page ID learned from message echo: ${pageId}`);
+    }
   }
 }
 
-function isOutboundFromPage(event) {
+function isOutboundFromPage(event, entryId = "", platform = "messenger") {
   if (event.message?.is_echo === true) return true;
-  if (pageId && event.sender?.id && String(event.sender.id) === String(pageId)) {
-    return true;
-  }
+  const senderId = event.sender?.id ? String(event.sender.id) : "";
+  if (!senderId) return false;
+  if (getOutboundSenderIds().has(senderId)) return true;
+  if (platform === "instagram" && entryId && senderId === String(entryId)) return true;
   return false;
+}
+
+function isOutboundWebhookCandidate(event, entryId = "", platform = "messenger") {
+  if (event.message?.is_echo === true) return true;
+  return isOutboundFromPage(event, entryId, platform);
 }
 
 function isKnownBotOutboundText(text) {
@@ -885,21 +905,21 @@ async function resumeBotForCustomer(customerId, adminText) {
   }
 }
 
-async function handlePageOutbound(event, platform = "messenger") {
-  if (!isOutboundFromPage(event)) return;
+async function handlePageOutbound(event, platform = "messenger", entryId = "") {
+  if (!isOutboundFromPage(event, entryId, platform)) return;
 
   const customerId = event.recipient?.id;
   const mid = event.message?.mid;
   const text = event.message?.text || "";
-  if (!customerId || !mid) {
-    console.log("Page outbound missing customerId or mid:", JSON.stringify(event).slice(0, 400));
+  if (!customerId) {
+    console.log("Page outbound missing customerId:", JSON.stringify(event).slice(0, 400));
     return;
   }
-  if (String(customerId) === String(pageId)) {
-    console.log("Page outbound skipped — recipient is page, not customer.");
+  if (getOutboundSenderIds().has(String(customerId))) {
+    console.log("Page outbound skipped — recipient is page/IG account, not customer.");
     return;
   }
-  if (botSentMessageIds.has(mid)) return;
+  if (mid && botSentMessageIds.has(mid)) return;
 
   console.log(
     `Page outbound → customer ${customerId}: echo=${Boolean(event.message?.is_echo)} text=${JSON.stringify(text)} resume=${isAdminResumeCommand(text)} platform=${platform}`
@@ -1566,6 +1586,17 @@ app.get("/admin", async (req, res) => {
   const token = adminToken(req);
   const handoffs = listActiveHandoffs();
   const meta = await fetchPageInstagramStatus();
+  let webhookSubHtml = "";
+  try {
+    const subStatus = await getMessagingSubscriptionStatus();
+    const fields = [...extractSubscribedFieldsFromStatus(subStatus)].sort().join(", ") || "unknown";
+    const echoesOn = hasMessageEchoesSubscription(subStatus);
+    webhookSubHtml = echoesOn
+      ? `<p class="muted"><strong>Webhook:</strong> message_echoes <span style="color:#0a7">on</span> (${escapeHtml(fields)}) — admin replies from Business Suite should pause the bot.</p>`
+      : `<div class="alert-warn"><strong>Webhook:</strong> <code>message_echoes</code> is <strong>not</strong> subscribed (${escapeHtml(fields)}). The bot cannot detect when you reply in Business Suite. In <a href="https://developers.facebook.com/" target="_blank" rel="noopener">Meta Developer</a> → your app → Webhooks → Page (and Instagram) → enable <strong>message_echoes</strong>, then <a href="/admin/subscribe-webhooks?token=${encodeURIComponent(token)}">re-subscribe webhooks</a>.</div>`;
+  } catch (_) {
+    webhookSubHtml = `<p class="muted"><strong>Webhook:</strong> could not check subscription — set <code>PAGE_ID</code> on Render.</p>`;
+  }
 
   let newLeads = 0;
   let activeOrders = 0;
@@ -1656,6 +1687,7 @@ app.get("/admin", async (req, res) => {
   });
 
   const body = `${metaHtml}
+${webhookSubHtml}
 ${lowStockAlert}
 ${stats}
 <p class="muted"><a href="/admin/analytics/view?token=${encodeURIComponent(token)}">Analytics dashboard →</a></p>
@@ -2419,12 +2451,17 @@ app.get("/admin/subscribe-webhooks", async (req, res) => {
   const status = await getMessagingSubscriptionStatus().catch((e) => ({
     error: e.message,
   }));
+  const fields = [...extractSubscribedFieldsFromStatus(status)].sort();
   res.json({
     subscribeResult: result,
     currentSubscriptions: status,
+    subscribedFields: fields,
+    messageEchoesEnabled: fields.includes("message_echoes"),
     hint:
       result.hint ||
-      "If subscribe failed, set PAGE_ID on Render. For personal IG DMs (not app admins), instagram_manage_messages must be Approved in App Review.",
+      (fields.includes("message_echoes")
+        ? "message_echoes is on — admin replies from Business Suite should pause the bot."
+        : "Enable message_echoes in Meta Developer → Webhooks (Page + Instagram), then call this endpoint again."),
   });
 });
 
@@ -2622,16 +2659,21 @@ async function processWebhookEvents(body) {
       continue;
     }
 
-    rememberPageIdFromEvent(event);
+    rememberOutboundSenderFromEvent(event);
 
-    if (DEBUG_WEBHOOK || /#bot/i.test(text) || platform === "instagram") {
+    if (
+      DEBUG_WEBHOOK ||
+      /#bot/i.test(text) ||
+      platform === "instagram" ||
+      isOutboundWebhookCandidate(event, entryId, platform)
+    ) {
       console.log(
         `Webhook ${platform}/${channel}: echo=${Boolean(event.message?.is_echo)} self=${Boolean(event.message?.is_self)} sender=${event.sender?.id} recipient=${event.recipient?.id} entry=${entryId} text=${JSON.stringify(text)}`
       );
     }
 
-    if (isOutboundFromPage(event)) {
-      await handlePageOutbound(event, platform);
+    if (isOutboundFromPage(event, entryId, platform)) {
+      await handlePageOutbound(event, platform, entryId);
       continue;
     }
 
@@ -3062,7 +3104,11 @@ async function loadPageId() {
   }
 }
 
-const DEFAULT_SUBSCRIBED_FIELD_SETS = ["messages", "messages,messaging_postbacks"];
+const DEFAULT_SUBSCRIBED_FIELD_SETS = [
+  "messages,messaging_postbacks,message_echoes",
+  "messages,messaging_postbacks",
+  "messages",
+];
 
 function getSubscribedFieldAttempts() {
   if (process.env.WEBHOOK_SUBSCRIBED_FIELDS) {
@@ -3162,6 +3208,23 @@ async function getMessagingSubscriptionStatus() {
   );
   const data = await response.json();
   return { pageId: pid, data };
+}
+
+function extractSubscribedFieldsFromStatus(status) {
+  const fields = new Set();
+  const apps = status?.data?.data;
+  if (!Array.isArray(apps)) return fields;
+  for (const app of apps) {
+    for (const f of String(app.subscribed_fields || "").split(",")) {
+      const trimmed = f.trim();
+      if (trimmed) fields.add(trimmed);
+    }
+  }
+  return fields;
+}
+
+function hasMessageEchoesSubscription(status) {
+  return extractSubscribedFieldsFromStatus(status).has("message_echoes");
 }
 
 (async function startServer() {
