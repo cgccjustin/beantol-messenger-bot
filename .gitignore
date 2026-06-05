@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.log
+knowledge/index.json
+knowledge/sources/*.txt
+API KEY.txt
+KEYS.txt
+secrets/

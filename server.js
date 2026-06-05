@@ -1,0 +1,2137 @@
+/**
+ * Beantol Messenger AI Bot
+ * Receives messages from Facebook Messenger, replies using OpenAI.
+ */
+
+require("dotenv").config();
+const express = require("express");
+const nodemailer = require("nodemailer");
+const OpenAI = require("openai");
+const { SYSTEM_RULES } = require("./system-rules");
+const rag = require("./lib/rag");
+const { syncGoogleDocs, isGoogleSyncConfigured } = require("./lib/google-docs-sync");
+const {
+  analyzeLeadSignal,
+  analyzeOrderSignal,
+  extractName,
+  ORDER_INTENT_PATTERN,
+} = require("./lib/lead-capture");
+const {
+  isLeadCaptureConfigured,
+  recordLead,
+  listLeads,
+} = require("./lib/leads");
+const {
+  isOrderCaptureConfigured,
+  recordOrder,
+  listOrders,
+} = require("./lib/orders");
+
+const app = express();
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
+const HANDOFF_TIMEOUT_HOURS = Number(process.env.HANDOFF_TIMEOUT_HOURS || 24);
+const HANDOFF_NOTIFY_EMAIL =
+  process.env.HANDOFF_NOTIFY_EMAIL || "cgccjustin@gmail.com";
+const LEAD_NOTIFY_EMAIL =
+  process.env.LEAD_NOTIFY_EMAIL || HANDOFF_NOTIFY_EMAIL;
+const ORDER_NOTIFY_EMAIL =
+  process.env.ORDER_NOTIFY_EMAIL || LEAD_NOTIFY_EMAIL;
+const DELIVERY_ALERT_COOLDOWN_MS =
+  Number(process.env.DELIVERY_ALERT_COOLDOWN_MINUTES || 240) * 60 * 1000;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const EMAIL_FROM =
+  process.env.EMAIL_FROM || "onboarding@resend.dev";
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+
+const HANDOFF_REPLY =
+  "Got it — I am connecting you with our team. A Beantol team member will reply to you personally here in this chat as soon as they can. Please stay on this thread.";
+
+const BOT_RESUME_REPLY =
+  process.env.BOT_RESUME_REPLY ||
+  "Our chat assistant is back on — you can ask about coffee, prices, orders, or delivery anytime.";
+
+const ADMIN_RESUME_COMMANDS = (process.env.ADMIN_RESUME_COMMANDS || "#bot")
+  .split(",")
+  .map((cmd) => cmd.trim().toLowerCase())
+  .filter(Boolean);
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+const DEBUG_WEBHOOK = process.env.DEBUG_WEBHOOK === "true";
+const PAGE_ID_ENV = process.env.PAGE_ID;
+const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
+const INSTAGRAM_USERNAME = process.env.INSTAGRAM_USERNAME;
+const SUPPORT_TIMEZONE = process.env.SUPPORT_TIMEZONE || "Asia/Manila";
+const SUPPORT_HOURS_START = Number(process.env.SUPPORT_HOURS_START || 9);
+const SUPPORT_HOURS_END = Number(process.env.SUPPORT_HOURS_END || 21);
+
+const AFTER_HOURS_HANDOFF_REPLY =
+  process.env.AFTER_HOURS_HANDOFF_REPLY ||
+  "Sorry — there is no customer support agent available to chat at this hour. Our team can connect with you live on Messenger daily from 9:00 AM to 9:00 PM (Philippine time). I can still help you here with questions about coffee, prices, orders, and delivery. You can also leave your message and check back during support hours, or message again between 9 AM and 9 PM when an agent can assist. How can I help you now?";
+
+/** @type {Map<string, { handedOffAt: number, expiresAt: number, lastMessage: string }>} */
+const handoffSessions = new Map();
+
+/** @type {Map<string, 'en' | 'tl' | 'ceb'>} */
+const replyLanguagePrefs = new Map();
+
+/** @type {Map<string, number>} senderId -> alert cooldown expiresAt */
+const deliveryAlertCooldowns = new Map();
+
+/** After delivery step-2 reply, bare YES / agent phrases trigger handoff */
+const deliveryAgentOfferPending = new Map();
+const DELIVERY_AGENT_OFFER_TTL_MS = 48 * 60 * 60 * 1000;
+
+const CHAT_HISTORY_MAX_MESSAGES = Number(
+  process.env.CHAT_HISTORY_MAX_MESSAGES || 20
+);
+const CHAT_HISTORY_TTL_MS =
+  Number(process.env.CHAT_HISTORY_TTL_HOURS || 24) * 60 * 60 * 1000;
+
+/** @type {Map<string, { messages: { role: "user" | "assistant"; content: string }[]; updatedAt: number }>} */
+const chatHistories = new Map();
+
+function getChatHistory(senderId) {
+  const entry = chatHistories.get(senderId);
+  if (!entry) return [];
+  if (Date.now() - entry.updatedAt > CHAT_HISTORY_TTL_MS) {
+    chatHistories.delete(senderId);
+    return [];
+  }
+  return entry.messages;
+}
+
+function appendChatHistory(senderId, userText, assistantReply) {
+  let entry = chatHistories.get(senderId);
+  if (!entry) {
+    entry = { messages: [], updatedAt: Date.now() };
+  }
+  entry.messages.push({ role: "user", content: userText });
+  entry.messages.push({ role: "assistant", content: assistantReply });
+  if (entry.messages.length > CHAT_HISTORY_MAX_MESSAGES) {
+    entry.messages = entry.messages.slice(-CHAT_HISTORY_MAX_MESSAGES);
+  }
+  entry.updatedAt = Date.now();
+  chatHistories.set(senderId, entry);
+}
+
+function getSupportLocalHour() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: SUPPORT_TIMEZONE,
+    hour: "numeric",
+    hour12: false,
+  }).formatToParts(new Date());
+  const hourPart = parts.find((p) => p.type === "hour");
+  return Number(hourPart?.value ?? 0);
+}
+
+function isWithinLiveSupportHours() {
+  const hour = getSupportLocalHour();
+  return hour >= SUPPORT_HOURS_START && hour < SUPPORT_HOURS_END;
+}
+
+function getSupportHoursSystemNote() {
+  if (isWithinLiveSupportHours()) {
+    return `Live customer support handoff is available now (${SUPPORT_HOURS_START}:00–${SUPPORT_HOURS_END === 24 ? "midnight" : `${SUPPORT_HOURS_END}:00`} ${SUPPORT_TIMEZONE}). Use [[HANDOFF]] when the customer wants an agent and rules allow it.`;
+  }
+  return `Live customer support is OFF right now (outside ${SUPPORT_HOURS_START} AM–${SUPPORT_HOURS_END === 21 ? "9" : SUPPORT_HOURS_END} PM ${SUPPORT_TIMEZONE}). Do NOT use [[HANDOFF]]. If they want a person, say no agent is available at this hour, state live support is daily 9 AM–9 PM Philippine time, and offer to keep helping via AI or to message again during support hours.`;
+}
+
+/** Sellable SKUs — keys are accepted in UNAVAILABLE_PRODUCTS on Render */
+const CATALOG_PRODUCTS = [
+  {
+    id: "beantol-prime",
+    label: "Beantol Prime",
+    keys: ["beantol prime", "prime"],
+    alternative: "Brazil Cerrado or Brazil Santos",
+  },
+  {
+    id: "brazil-santos",
+    label: "Brazil Santos",
+    keys: ["brazil santos", "santos"],
+    alternative: "Brazil Cerrado or Beantol Prime",
+  },
+  {
+    id: "brazil-cerrado",
+    label: "Brazil Cerrado",
+    keys: ["brazil cerrado", "cerrado"],
+    alternative: "Brazil Santos or Beantol Prime",
+  },
+  {
+    id: "ethiopia-guji-espresso",
+    label: "Ethiopia Guji (espresso)",
+    keys: ["ethiopia guji", "guji espresso", "guji"],
+    alternative: "Ethiopia Sidama or Beantol Prime",
+  },
+  {
+    id: "ethiopia-sidama",
+    label: "Ethiopia Sidama",
+    keys: ["ethiopia sidama", "sidama"],
+    alternative: "Ethiopia Guji or Brazil Cerrado",
+  },
+  {
+    id: "mt-apo",
+    label: "Mt. Apo (filter)",
+    keys: ["mt apo", "mt. apo", "mount apo"],
+    alternative: "Mt. Apo (Ellaga) or filter Guji",
+  },
+  {
+    id: "mt-apo-ellaga",
+    label: "Mt. Apo (Ellaga)",
+    keys: ["mt apo ellaga", "ellaga", "dione ellaga"],
+    alternative: "Mt. Apo (filter) or filter Guji",
+  },
+  {
+    id: "guji-filter",
+    label: "Guji (filter)",
+    keys: ["guji filter", "filter guji"],
+    alternative: "Kenya (filter) or Mt. Apo",
+  },
+  {
+    id: "kenya-filter",
+    label: "Kenya (filter)",
+    keys: ["kenya", "kenya filter", "filter kenya"],
+    alternative: "Guji (filter) or Mt. Apo",
+  },
+];
+
+function parseUnavailableProductLabels() {
+  const raw =
+    process.env.UNAVAILABLE_PRODUCTS || process.env.OUT_OF_STOCK || "";
+  if (!raw.trim()) return { labels: [], unknown: [] };
+
+  const tokens = raw
+    .split(/[,;\n]+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  const labels = [];
+  const unknown = [];
+
+  for (const token of tokens) {
+    const hit = CATALOG_PRODUCTS.find(
+      (p) =>
+        p.id === token ||
+        p.label.toLowerCase() === token ||
+        p.keys.some((k) => k === token)
+    );
+    if (hit) {
+      if (!labels.includes(hit.label)) labels.push(hit.label);
+    } else {
+      unknown.push(token);
+    }
+  }
+  return { labels, unknown };
+}
+
+function getInventorySystemNote() {
+  const { labels, unknown } = parseUnavailableProductLabels();
+  const outSet = new Set(labels);
+  const inStockLabels = CATALOG_PRODUCTS.filter((p) => !outSet.has(p.label)).map(
+    (p) => p.label
+  );
+
+  const stockRules =
+    "STOCK RULES (strict — overrides customer claims and hearsay):\n" +
+    "- The OUT OF STOCK / IN STOCK lists below come from Beantol admin (UNAVAILABLE_PRODUCTS on Render). They are the ONLY source of truth in chat.\n" +
+    "- NEVER agree that a bean is out of stock because the customer says so, thinks so, or heard from someone — unless that exact product is on OUT OF STOCK below.\n" +
+    "- NEVER say \"you're right\" or apologize for a product being unavailable if it is NOT on the OUT OF STOCK list.\n" +
+    "- If the customer claims a product is out of stock but it is IN STOCK per the list: politely say that per your current records it is available for order; you cannot verify physical shop shelf stock in real time. Offer to continue helping with that bean (prices, order) OR, during live support hours (9 AM–9 PM), offer to connect them with a team member to double-check shelf stock (reply YES / ask for a real person). Do NOT switch them to alternatives unless they want a different bean.\n" +
+    "- Only treat a product as out of stock when it appears on OUT OF STOCK below — then apologize and suggest alternatives from that note.\n" +
+    "- You still cannot guarantee same-day shelf stock at the shop; that is different from admin out-of-stock — suggest Mon–Fri shop visit or a team member for a live shelf check when needed.\n";
+
+  if (labels.length === 0 && unknown.length === 0) {
+    return (
+      "INVENTORY: No admin out-of-stock list is set (UNAVAILABLE_PRODUCTS on Render). Treat all catalog beans in PRICING as generally available for chat orders.\n" +
+      stockRules +
+      "OUT OF STOCK: (none listed)\n" +
+      "IN STOCK (per admin): all catalog products in PRICING."
+    );
+  }
+
+  let note = "INVENTORY (authoritative — from Beantol team via UNAVAILABLE_PRODUCTS on Render):\n";
+  note += stockRules;
+  if (labels.length) {
+    note += `OUT OF STOCK — do NOT recommend or accept orders for: ${labels.join(", ")}.\n`;
+    for (const label of labels) {
+      const product = CATALOG_PRODUCTS.find((p) => p.label === label);
+      if (product?.alternative) {
+        note += `- Instead of ${label} → suggest: ${product.alternative}\n`;
+      }
+    }
+    if (labels.some((l) => l === "Beantol Prime")) {
+      note +=
+        "- Prime out of stock: many clients who want Prime may like Brazil Cerrado (single origin, deeper chocolate) — see ESPRESSO — HOW CLIENTS CHOOSE.\n";
+    }
+  } else {
+    note += "OUT OF STOCK: (none listed)\n";
+  }
+  if (inStockLabels.length) {
+    note += `IN STOCK (per admin — recommend and quote normally): ${inStockLabels.join(", ")}.\n`;
+  }
+  if (unknown.length) {
+    note += `Unknown UNAVAILABLE_PRODUCTS tokens (fix on Render): ${unknown.join(", ")}. Valid examples: prime, beantol prime, brazil cerrado, sidama, kenya, mt apo ellaga\n`;
+  }
+  return note;
+}
+
+/** Facebook Page ID — used to detect admin messages when is_echo is missing */
+let pageId = null;
+
+/** Message IDs sent by this bot — used to ignore echoes of our own replies */
+const botSentMessageIds = new Set();
+const BOT_MID_MAX = 500;
+
+/** Detect if the customer wants bot reply language changed (not human handoff). */
+function detectReplyLanguagePreference(text) {
+  const t = text.trim();
+  if (!t) return null;
+
+  if (
+    /\b(?:reply|respond|answer|speak|write|sagot|tubag).*(?:in )?english\b/i.test(t) ||
+    /\benglish (?:only|please|na lang|pls|po)\b/i.test(t) ||
+    /\bswitch (?:back )?to english\b/i.test(t) ||
+    /\bback\s+to\s+english\b/i.test(t) ||
+    /\benglish\s+balik\b/i.test(t) ||
+    /\bbalik\s+(?:sa\s+)?english\b/i.test(t) ||
+    /\b(?:balik|back)\b.*\b(?:english|inglish)\b/i.test(t) ||
+    /\b(?:english|inglish)\b.*\b(?:balik|back)\b/i.test(t) ||
+    (/\b(?:english|inglish)\b/i.test(t) &&
+      /\b(?:balik|back|switch|return|na lang|nlng)\b/i.test(t))
+  ) {
+    return "en";
+  }
+
+  if (
+    /\b(?:reply|respond|answer|speak|write).*(?:in )?(?:tagalog|filipino)\b/i.test(t) ||
+    /\btagalog (?:only|please|na lang|pls|lang)\b/i.test(t) ||
+    /paki-?tagalog/i.test(t) ||
+    /\b(?:puede|pwede|puede)\s+ka\s+mag\s+tagalog\b/i.test(t)
+  ) {
+    return "tl";
+  }
+
+  if (
+    /\b(?:reply|respond|answer|speak|write).*(?:in )?(?:cebuano|bisaya)\b/i.test(t) ||
+    /\b(?:cebuano|bisaya) (?:only|please|na lang|pls|lang)\b/i.test(t) ||
+    /\bbisaya lang\b/i.test(t) ||
+    /\b(?:puede|pwede|puede)\s+ka\s+mag\s+(?:bisaya|cebuano)\b/i.test(t) ||
+    /\b(?:can you|could you)\s+(?:speak|reply|talk|write)\s+(?:in\s+)?(?:bisaya|cebuano)\b/i.test(t) ||
+    (/\b(?:mag|sa)\s+(?:bisaya|cebuano)\b/i.test(t) &&
+      /\b(?:ka|mo|lang|please|pls|puede|pwede)\b/i.test(t))
+  ) {
+    return "ceb";
+  }
+
+  return null;
+}
+
+function isReplyLanguagePreferenceRequest(text) {
+  return detectReplyLanguagePreference(text) !== null;
+}
+
+function updateReplyLanguagePreference(senderId, userText) {
+  const pref = detectReplyLanguagePreference(userText);
+  if (pref) replyLanguagePrefs.set(senderId, pref);
+}
+
+function getReplyLanguageInstruction(senderId) {
+  const pref = replyLanguagePrefs.get(senderId) || "en";
+  if (pref === "tl") {
+    return "LANGUAGE FOR THIS REPLY: Write the entire message in Tagalog. Continue in Tagalog until the customer asks to switch back to English.";
+  }
+  if (pref === "ceb") {
+    return "LANGUAGE FOR THIS REPLY: Write the entire message in Cebuano/Bisaya. Continue in Cebuano until the customer asks to switch back to English.";
+  }
+  return (
+    "LANGUAGE FOR THIS REPLY: Write the entire message in English only. " +
+    "The customer may have written in Cebuano, Tagalog, or Bislish — you must still reply in English. " +
+    "Do not use Cebuano, Bisaya, or Tagalog in your reply (except proper nouns like Beantol). " +
+    "Do not mirror their language."
+  );
+}
+
+const openai = OPENAI_API_KEY
+  ? new OpenAI({ apiKey: OPENAI_API_KEY })
+  : null;
+
+function shouldSyncGoogleDocsOnStartup() {
+  if (!isGoogleSyncConfigured()) return false;
+  // Default ON when Google Docs are configured; set RAG_SYNC_ON_STARTUP=false to disable.
+  return process.env.RAG_SYNC_ON_STARTUP !== "false";
+}
+
+async function bootstrapKnowledge() {
+  rag.loadIndex();
+
+  if (!isGoogleSyncConfigured()) {
+    if (!rag.isReady() && openai) {
+      try {
+        console.log("RAG: no index — building from knowledge/sources...");
+        await rag.rebuildIndex(openai);
+      } catch (err) {
+        console.warn("RAG: auto-index failed (bot uses source fallback):", err.message);
+      }
+    }
+    return;
+  }
+
+  if (shouldSyncGoogleDocsOnStartup()) {
+    try {
+      console.log("RAG: syncing Google Docs on startup...");
+      await syncGoogleDocs();
+      if (openai) await rag.rebuildIndex(openai);
+      return;
+    } catch (err) {
+      console.warn("RAG: startup Google sync failed:", err.message);
+      rag.loadIndex();
+    }
+  }
+
+  if (!rag.isReady() && openai) {
+    try {
+      console.log("RAG: building index from knowledge/sources...");
+      await rag.rebuildIndex(openai);
+    } catch (err) {
+      console.warn("RAG: auto-index failed (bot uses source fallback):", err.message);
+    }
+  }
+}
+
+const HANDOFF_MARKER = "[[HANDOFF]]";
+
+const HANDOFF_PATTERNS = [
+  /\bhuman\b/i,
+  /\breal person\b/i,
+  /\breal live person\b/i,
+  /\blive person\b/i,
+  /\bi want to chat with an agent\b/i,
+  /\bwant to chat with (?:a )?(?:agent|representative)\b/i,
+  /\blocal person\b/i,
+  /\btalk to (?:a )?(?:person|human|agent|staff|someone|representative)\b/i,
+  /\bchat with (?:a )?(?:person|human|agent|staff|someone|representative)\b/i,
+  /\bchat with (?:a )?(?:real|live) (?:person|human)\b/i,
+  /\bspeak to (?:a )?(?:person|human|agent|staff|someone|representative)\b/i,
+  /\b(?:need|want|get) (?:an? )?(?:agent|person|human|staff|someone|representative)\b/i,
+  /\b(?:i )?need agent\b/i,
+  /\bagent (?:to )?chat\b/i,
+  /\bnot (?:an? )?ai\b/i,
+  /\bno ai\b/i,
+  /\bis anyone (?:available|there|online)\b/i,
+  /\bcustomer service\b/i,
+  /\bagent please\b/i,
+  /\brepresentative\b/i,
+  /\bconnect me (?:to|with)\b/i,
+  /\bmay tao\b/i,
+  /\bpwede.*(?:staff|tao|person|agent)\b/i,
+  /\btawag.*staff\b/i,
+  /\bchat in person\b/i,
+  /\bavailable to chat\b/i,
+  /\bteam member\b/i,
+  /\bactual (?:person|human)\b/i,
+];
+
+const HANDOFF_INTENT_WORDS =
+  /\b(need|want|get|talk|chat|speak|connect|call|ask|looking for|hanap|gusto|pwede|please|help)\b/i;
+const HANDOFF_TARGET_WORDS =
+  /\b(agent|human|person|people|staff|someone|representative|tao|employee|team member|real person|live person|operator)\b/i;
+
+function isDeliveryInquiry(text) {
+  const t = text.trim();
+  if (!t) return false;
+  return (
+    /\b(?:delivery|deliver|deliveries|padala|hatod|shipping|ship|maxim)\b/i.test(t) ||
+    /\b(?:pwede|puede|gusto|can i|can you).*(?:deliver|hatod|padala|maxim)\b/i.test(t) ||
+    /\border.*(?:deliver|hatod|padala|maxim)\b/i.test(t) ||
+    /\b(?:deliver|hatod|padala|maxim).*(?:order|coffee|beans)\b/i.test(t)
+  );
+}
+
+function aiReplyIsDeliveryFlow(reply) {
+  const r = (reply || "").trim();
+  if (!r) return false;
+  return (
+    /\bmaxim\b/i.test(r) &&
+    /\b(?:address|contact name|phone|mobile|contact number)\b/i.test(r)
+  );
+}
+
+function aiReplyIsDeliveryDetailsConfirmation(reply) {
+  const r = (reply || "").trim();
+  if (!r) return false;
+  return (
+    /\bthanks for (?:the )?details\b/i.test(r) &&
+    /\b(?:payment|pay).*(?:before|first|prior|settled|settle)/i.test(r) &&
+    /\bmaxim\b/i.test(r) &&
+    /\b(?:reply\s+)?yes\b|\bcustomer representative\b|\breal live person\b/i.test(
+      r
+    )
+  );
+}
+
+function markDeliveryAgentOfferPending(senderId) {
+  deliveryAgentOfferPending.set(senderId, Date.now());
+}
+
+function clearDeliveryAgentOfferPending(senderId) {
+  deliveryAgentOfferPending.delete(senderId);
+}
+
+function isDeliveryAgentOfferPending(senderId) {
+  const at = deliveryAgentOfferPending.get(senderId);
+  if (!at) return false;
+  if (Date.now() - at > DELIVERY_AGENT_OFFER_TTL_MS) {
+    deliveryAgentOfferPending.delete(senderId);
+    return false;
+  }
+  return true;
+}
+
+function wantsAgentAfterDeliveryOffer(text) {
+  const t = text.trim();
+  if (!t) return false;
+  if (
+    /^(yes|oo|yes po|oo po|yes please|oo please|yes,?\s*please|oo,?\s*please)$/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (
+    /^(yes|oo)\b/i.test(t) &&
+    t.length <= 40 &&
+    /\b(?:agent|representative|person|staff|tao|team)\b/i.test(t)
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:want|like|need|gusto).*(?:agent|representative|staff|person|tao)\b/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:chat|talk|speak|connect).*(?:agent|representative|staff|person|tao)\b/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  if (/\b(?:real|live)\s+(?:person|human)\b/i.test(t)) return true;
+  if (/\bcustomer representative\b/i.test(t)) return true;
+  return false;
+}
+
+function looksLikeDeliveryDetailsSubmission(text) {
+  const t = text.trim();
+  if (t.length < 25) return false;
+  const hasPhone =
+    /\b(?:09\d{9}|\+?63[\s-]?9\d{9})\b/.test(t) ||
+    /\b\d{3}[-.\s]?\d{3,4}[-.\s]?\d{4}\b/.test(t);
+  const hasAddressHint =
+    /\b(?:street|st\.|ave|avenue|road|rd\.|barangay|brgy|city|cebu|village|subdivision|unit|floor|blk|block|purok|banilad|mandaue|lapu|consolacion)\b/i.test(
+      t
+    ) || t.length > 80;
+  return hasPhone && hasAddressHint;
+}
+
+function wantsHumanHandoff(text, senderId) {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  if (isReplyLanguagePreferenceRequest(normalized)) return false;
+  if (
+    senderId &&
+    isDeliveryAgentOfferPending(senderId) &&
+    wantsAgentAfterDeliveryOffer(normalized)
+  ) {
+    return true;
+  }
+  if (isDeliveryInquiry(normalized) && !/\b(?:person|human|agent|staff|tao|representative)\b/i.test(normalized)) {
+    return false;
+  }
+  if (HANDOFF_PATTERNS.some((pattern) => pattern.test(normalized))) return true;
+  return (
+    HANDOFF_INTENT_WORDS.test(normalized) && HANDOFF_TARGET_WORDS.test(normalized)
+  );
+}
+
+function sanitizeBotReply(text) {
+  let out = text.trim();
+  const stripPatterns = [
+    /call (?:us|me)(?:\s+on|\s+in)?\s*messenger[^\n]*/gi,
+    /message us(?:\s+on)?\s*messenger[^\n]*/gi,
+    /contact us(?:\s+on)?\s*messenger[^\n]*/gi,
+    /(?:tap|click)\s+(?:the\s+)?button[^\n]*/gi,
+    /send (?:us\s+)?a message(?:\s+on messenger)?[^\n]*/gi,
+  ];
+  for (const pattern of stripPatterns) {
+    out = out.replace(pattern, "");
+  }
+  return out.replace(/\n{3,}/g, "\n\n").replace(/  +/g, " ").trim() || text.trim();
+}
+
+function isAiHandoffReply(reply) {
+  return Boolean(reply && reply.includes(HANDOFF_MARKER));
+}
+
+function isSmtpConfigured() {
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return false;
+  const pass = SMTP_PASS.trim();
+  if (pass.length < 10) return false;
+  if (/REPLACE|your_|changeme|example/i.test(pass)) return false;
+  return true;
+}
+
+function isResendConfigured() {
+  return Boolean(RESEND_API_KEY && RESEND_API_KEY.trim().startsWith("re_"));
+}
+
+function isEmailConfigured() {
+  return isResendConfigured() || isSmtpConfigured();
+}
+
+function getEmailProvider() {
+  if (isResendConfigured()) return "resend";
+  if (isSmtpConfigured()) return "smtp";
+  return null;
+}
+
+function getActiveHandoff(senderId) {
+  const session = handoffSessions.get(senderId);
+  if (!session) return null;
+
+  if (Date.now() > session.expiresAt) {
+    handoffSessions.delete(senderId);
+    return null;
+  }
+
+  return session;
+}
+
+function startHandoff(senderId, userText, platform = "messenger") {
+  clearDeliveryAgentOfferPending(senderId);
+  const existing = handoffSessions.get(senderId);
+  const now = Date.now();
+  handoffSessions.set(senderId, {
+    handedOffAt: now,
+    expiresAt: now + HANDOFF_TIMEOUT_HOURS * 60 * 60 * 1000,
+    lastMessage: userText.trim(),
+    platform: existing?.platform || platform,
+  });
+}
+
+function resolveHandoff(senderId) {
+  clearDeliveryAgentOfferPending(senderId);
+  return handoffSessions.delete(senderId);
+}
+
+function isSupportedWebhookObject(object) {
+  return object === "page" || object === "instagram";
+}
+
+function webhookPlatform(body) {
+  return body?.object === "instagram" ? "instagram" : "messenger";
+}
+
+function platformLabel(platform) {
+  return platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
+}
+
+function rememberBotMessageId(mid) {
+  if (!mid) return;
+  botSentMessageIds.add(mid);
+  if (botSentMessageIds.size > BOT_MID_MAX) {
+    const oldest = botSentMessageIds.values().next().value;
+    botSentMessageIds.delete(oldest);
+  }
+}
+
+function normalizeCommandText(text) {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\u200B-\u200D\uFEFF]/g, "");
+}
+
+/** True when an admin sent a resume command (e.g. #bot) from Business Suite. */
+function isAdminResumeCommand(text) {
+  const raw = (text || "").trim();
+  if (!raw) return false;
+  if (/#bot\b/i.test(raw) || /\bbot\s*#/i.test(raw)) return true;
+  const normalized = normalizeCommandText(text);
+  return ADMIN_RESUME_COMMANDS.some((cmd) => {
+    const target = normalizeCommandText(cmd);
+    return normalized === target || normalized.includes(target);
+  });
+}
+
+function rememberPageIdFromEvent(event) {
+  if (event.message?.is_echo !== true || !event.sender?.id) return;
+  const senderPageId = String(event.sender.id);
+  if (pageId !== senderPageId) {
+    pageId = senderPageId;
+    console.log(`Page ID learned from message echo: ${pageId}`);
+  }
+}
+
+function isOutboundFromPage(event) {
+  if (event.message?.is_echo === true) return true;
+  if (pageId && event.sender?.id && String(event.sender.id) === String(pageId)) {
+    return true;
+  }
+  return false;
+}
+
+/** Pause bot when a human admin replies from Business Suite (no extra customer message). */
+function pauseBotForAdminTakeover(customerId, adminText) {
+  if (adminText && isAdminResumeCommand(adminText)) return;
+  if (getActiveHandoff(customerId)) return;
+  startHandoff(customerId, "Admin replied from Business Suite");
+  console.log(
+    `Bot paused for ${customerId} — admin message detected. Auto-replies off for ${HANDOFF_TIMEOUT_HOURS}h or until admin sends ${ADMIN_RESUME_COMMANDS[0]}.`
+  );
+}
+
+const RESUME_SEND_DELAY_MS = Number(process.env.RESUME_SEND_DELAY_MS || 1200);
+
+async function resumeBotForCustomer(customerId, adminText) {
+  const hadHandoff = Boolean(getActiveHandoff(customerId));
+  resolveHandoff(customerId);
+  console.log(
+    `Resume command "${adminText}" for ${customerId} — handoff cleared (was paused: ${hadHandoff}).`
+  );
+
+  if (RESUME_SEND_DELAY_MS > 0) {
+    await new Promise((resolve) => setTimeout(resolve, RESUME_SEND_DELAY_MS));
+  }
+
+  try {
+    await sendMessageWithFallback(customerId, BOT_RESUME_REPLY);
+    console.log(`Resume confirmation sent to ${customerId}.`);
+  } catch (err) {
+    console.error(`Resume confirmation failed for ${customerId}:`, err.message);
+  }
+}
+
+async function handlePageOutbound(event) {
+  if (!isOutboundFromPage(event)) return;
+
+  const customerId = event.recipient?.id;
+  const mid = event.message?.mid;
+  const text = event.message?.text || "";
+  if (!customerId || !mid) {
+    console.log("Page outbound missing customerId or mid:", JSON.stringify(event).slice(0, 400));
+    return;
+  }
+  if (String(customerId) === String(pageId)) {
+    console.log("Page outbound skipped — recipient is page, not customer.");
+    return;
+  }
+  if (botSentMessageIds.has(mid)) return;
+
+  console.log(
+    `Page outbound → customer ${customerId}: echo=${Boolean(event.message?.is_echo)} text=${JSON.stringify(text)} resume=${isAdminResumeCommand(text)}`
+  );
+
+  if (isAdminResumeCommand(text)) {
+    await resumeBotForCustomer(customerId, text);
+    return;
+  }
+
+  if (!text.trim()) return;
+
+  pauseBotForAdminTakeover(customerId, text);
+}
+
+let mailTransporter = null;
+
+async function sendAlertEmail({ subject, text, to }) {
+  const recipient = to || HANDOFF_NOTIFY_EMAIL;
+  const provider = getEmailProvider();
+  if (!provider) {
+    throw new Error(
+      "Email not configured. Set RESEND_API_KEY on Render (recommended) or SMTP_* for local dev."
+    );
+  }
+
+  if (provider === "resend") {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: EMAIL_FROM,
+        to: [recipient],
+        subject,
+        text,
+      }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || data.error || `Resend HTTP ${response.status}`);
+    }
+    return { provider: "resend", id: data.id };
+  }
+
+  const transporter = getMailTransporter();
+  if (!transporter) {
+    throw new Error("SMTP transporter unavailable.");
+  }
+
+  const info = await transporter.sendMail({
+    from: SMTP_FROM,
+    to: recipient,
+    subject,
+    text,
+  });
+  return { provider: "smtp", id: info.messageId };
+}
+
+function recentUserMessages(senderId, limit = 5) {
+  return getChatHistory(senderId)
+    .filter((m) => m.role === "user")
+    .map((m) => m.content)
+    .slice(-limit);
+}
+
+function queueLeadCapture(payload) {
+  if (!isLeadCaptureConfigured()) return;
+
+  recordLead(payload)
+    .then((result) => {
+      if (!result?.ok || !result.notify) return;
+      notifyLeadByEmail(result.lead, result.isNew).catch((err) => {
+        console.error("Lead alert email failed:", err.message);
+      });
+    })
+    .catch((err) => {
+      console.warn("Lead capture failed:", err.message);
+    });
+}
+
+function captureLeadFromMessage(senderId, userText, platform, options = {}) {
+  const signal = analyzeLeadSignal(userText, {
+    ...options,
+    historyTexts: recentUserMessages(senderId),
+  });
+  if (!signal) return;
+
+  queueLeadCapture({
+    senderId,
+    platform,
+    name: options.name || extractName(userText) || "",
+    phone: signal.phone || options.phone || "",
+    interest: signal.interest || "",
+    stage: signal.stage,
+    lastMessage: userText,
+    trigger: signal.trigger,
+  });
+}
+
+function queueOrderCapture(payload) {
+  if (!isOrderCaptureConfigured()) return;
+
+  recordOrder(payload)
+    .then((result) => {
+      if (!result?.ok || !result.notify) return;
+      notifyOrderByEmail(result.order, result.isNew).catch((err) => {
+        console.error("Order alert email failed:", err.message);
+      });
+    })
+    .catch((err) => {
+      console.warn("Order capture failed:", err.message);
+    });
+}
+
+function captureOrderFromMessage(senderId, userText, platform, options = {}) {
+  const historyTexts = recentUserMessages(senderId);
+  const isOrderIntent =
+    options.isOrderIntent || ORDER_INTENT_PATTERN.test(userText);
+  const signal = analyzeOrderSignal(userText, {
+    ...options,
+    historyTexts,
+    isOrderIntent,
+  });
+  if (!signal) return;
+
+  queueOrderCapture({
+    senderId,
+    platform,
+    name: signal.name || options.name || "",
+    phone: signal.phone || options.phone || "",
+    bean: signal.bean || "",
+    size: signal.size || "",
+    fulfillment: signal.fulfillment || "",
+    address: signal.address || "",
+    paymentStatus: signal.paymentStatus || "unpaid",
+    orderStatus: signal.orderStatus || "inquiry",
+    lastMessage: userText,
+    trigger: signal.trigger,
+  });
+}
+
+async function notifyOrderByEmail(order, isNew) {
+  if (!isEmailConfigured() || !order) return false;
+
+  const channel = order.platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
+  const action = isNew ? "New order" : "Order updated";
+  const adminPanelUrl =
+    PUBLIC_BASE_URL && ADMIN_SECRET
+      ? `${PUBLIC_BASE_URL}/admin/orders?token=${encodeURIComponent(ADMIN_SECRET)}`
+      : "";
+
+  try {
+    await sendAlertEmail({
+      to: ORDER_NOTIFY_EMAIL,
+      subject: `Beantol — ${action} ${order.orderId} (${order.orderStatus})`,
+      text: [
+        `${action} on ${channel}.`,
+        "",
+        `Order ID: ${order.orderId}`,
+        `Order status: ${order.orderStatus}`,
+        `Payment: ${order.paymentStatus}`,
+        `Bean: ${order.bean || "—"}`,
+        `Size: ${order.size || "—"}`,
+        `Fulfillment: ${order.fulfillment || "—"}`,
+        `Platform: ${channel}`,
+        `Sender ID: ${order.senderId}`,
+        order.name ? `Name: ${order.name}` : null,
+        order.phone ? `Phone: ${order.phone}` : null,
+        order.address ? `Address: ${order.address}` : null,
+        "",
+        `Last message: ${order.lastMessage}`,
+        "",
+        adminPanelUrl ? `View orders: ${adminPanelUrl}` : null,
+        "Open Meta Business Suite to reply in chat.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    console.log(`Order alert email sent for ${order.orderId}.`);
+    return true;
+  } catch (err) {
+    console.error("Order alert email failed:", err.message);
+    return false;
+  }
+}
+
+async function notifyLeadByEmail(lead, isNew) {
+  if (!isEmailConfigured() || !lead) return false;
+
+  const channel = lead.platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
+  const action = isNew ? "New lead" : "Lead updated";
+  const adminPanelUrl =
+    PUBLIC_BASE_URL && ADMIN_SECRET
+      ? `${PUBLIC_BASE_URL}/admin/leads?token=${encodeURIComponent(ADMIN_SECRET)}`
+      : "";
+
+  try {
+    await sendAlertEmail({
+      to: LEAD_NOTIFY_EMAIL,
+      subject: `Beantol — ${action} (${lead.stage})`,
+      text: [
+        `${action} on ${channel}.`,
+        "",
+        `Stage: ${lead.stage}`,
+        `Trigger: ${lead.trigger || "—"}`,
+        `Platform: ${channel}`,
+        `Sender ID: ${lead.senderId}`,
+        lead.name ? `Name: ${lead.name}` : null,
+        lead.phone ? `Phone: ${lead.phone}` : null,
+        lead.interest ? `Interest: ${lead.interest}` : null,
+        "",
+        `Last message: ${lead.lastMessage}`,
+        "",
+        adminPanelUrl ? `View leads: ${adminPanelUrl}` : null,
+        "Open Meta Business Suite to reply in chat.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    console.log(`Lead alert email sent for ${lead.senderId} (${lead.stage}).`);
+    return true;
+  } catch (err) {
+    console.error("Lead alert email failed:", err.message);
+    return false;
+  }
+}
+
+async function triggerHandoff(senderId, userText, source, platform = "messenger") {
+  startHandoff(senderId, userText, platform);
+  console.log(
+    `Human handoff started for ${senderId} (${source}, ${platformLabel(platform)}). Auto-replies paused for ${HANDOFF_TIMEOUT_HOURS}h or until admin resolves.`
+  );
+  await sendMessage(senderId, HANDOFF_REPLY);
+  notifyHandoffByEmail(senderId, userText, platform).catch((err) => {
+    console.error("Handoff email failed:", err.message);
+  });
+}
+
+/** Customer-requested handoff only — blocked outside live support hours. */
+async function attemptCustomerHandoff(
+  senderId,
+  userText,
+  source,
+  platform = "messenger"
+) {
+  if (!isWithinLiveSupportHours()) {
+    console.log(
+      `Customer handoff blocked for ${senderId} (${source}) — outside support hours (${SUPPORT_HOURS_START}:00–${SUPPORT_HOURS_END}:00 ${SUPPORT_TIMEZONE}).`
+    );
+    await sendMessage(senderId, AFTER_HOURS_HANDOFF_REPLY);
+    if (openai) {
+      appendChatHistory(senderId, userText, AFTER_HOURS_HANDOFF_REPLY);
+    }
+    return false;
+  }
+  await triggerHandoff(senderId, userText, source, platform);
+  return true;
+}
+
+function getMailTransporter() {
+  if (!isSmtpConfigured()) return null;
+  if (!mailTransporter) {
+    mailTransporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_PORT === 465,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+    });
+  }
+  return mailTransporter;
+}
+
+async function notifyHandoffByEmail(senderId, userText, platform = "messenger") {
+  if (!isEmailConfigured()) {
+    console.warn(
+      "Handoff email skipped — set RESEND_API_KEY on Render (recommended) or SMTP_* locally."
+    );
+    return;
+  }
+
+  const channel = platformLabel(platform);
+  const handedOffAt = new Date().toISOString();
+  const resumeUrl = buildResumeUrl(senderId, null, true);
+  const adminPanelUrl =
+    PUBLIC_BASE_URL && ADMIN_SECRET
+      ? `${PUBLIC_BASE_URL}/admin?token=${encodeURIComponent(ADMIN_SECRET)}`
+      : "";
+
+  const result = await sendAlertEmail({
+    subject: `Beantol — customer wants a human (${channel})`,
+    text: [
+      `A customer asked to speak with a real person on ${channel}.`,
+      "",
+      `Time: ${handedOffAt}`,
+      `Channel: ${channel}`,
+      `Sender ID: ${senderId}`,
+      `Their message: ${userText}`,
+      "",
+      "Bot auto-replies are paused. Reply in Meta Business Suite (Messenger or Instagram inbox), then resume the bot:",
+      resumeUrl ? `Resume AI + notify customer: ${resumeUrl}` : "(Set PUBLIC_BASE_URL on Render for one-click resume links)",
+      adminPanelUrl ? `All paused chats: ${adminPanelUrl}` : "",
+      "",
+      "Note: #bot in Business Suite often does not reach the server. Use the resume link above instead.",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  });
+
+  console.log(
+    `Handoff email sent to ${HANDOFF_NOTIFY_EMAIL} via ${result.provider}`
+  );
+}
+
+function shouldSendDeliveryAlert(senderId) {
+  const expiresAt = deliveryAlertCooldowns.get(senderId);
+  if (expiresAt && Date.now() < expiresAt) return false;
+  return true;
+}
+
+function markDeliveryAlertSent(senderId) {
+  deliveryAlertCooldowns.set(senderId, Date.now() + DELIVERY_ALERT_COOLDOWN_MS);
+}
+
+async function notifyDeliveryByEmail(
+  senderId,
+  userText,
+  source,
+  platform = "messenger"
+) {
+  if (!shouldSendDeliveryAlert(senderId)) {
+    console.log(
+      `Delivery alert skipped for ${senderId} (cooldown — already emailed recently).`
+    );
+    return false;
+  }
+
+  if (!isEmailConfigured()) {
+    console.warn(
+      "Delivery alert email skipped — set RESEND_API_KEY on Render (recommended) or SMTP_* locally."
+    );
+    return false;
+  }
+
+  const channel = platformLabel(platform);
+  const now = new Date().toISOString();
+  try {
+    const result = await sendAlertEmail({
+      subject: `Beantol — Maxim delivery inquiry (${channel})`,
+      text: [
+        `A customer asked about delivery on ${channel}.`,
+        "",
+        `Time: ${now}`,
+        `Channel: ${channel}`,
+        `Trigger: ${source}`,
+        `Sender ID: ${senderId}`,
+        `Their message: ${userText}`,
+        "",
+        "The bot is still auto-replying and collecting address, name, and phone in the chat.",
+        "Reply in Meta Business Suite when you take over — that will pause the bot for this customer.",
+      ].join("\n"),
+    });
+    markDeliveryAlertSent(senderId);
+    console.log(
+      `Delivery alert email sent to ${HANDOFF_NOTIFY_EMAIL} for ${senderId} (${source}) via ${result.provider}.`
+    );
+  } catch (err) {
+    console.error("Delivery alert email failed:", err.message);
+    return false;
+  }
+
+  return true;
+}
+
+function requireAdmin(req, res) {
+  if (!ADMIN_SECRET) {
+    res.status(503).json({ error: "ADMIN_SECRET is not configured on the server." });
+    return false;
+  }
+
+  const token = req.query.token || req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  if (token !== ADMIN_SECRET) {
+    res.status(401).json({ error: "Unauthorized." });
+    return false;
+  }
+
+  return true;
+}
+
+function getPublicBaseUrl(req) {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
+  if (!req) return "";
+  const host = req.get("host");
+  if (!host) return "";
+  const proto = req.get("x-forwarded-proto") || req.protocol || "https";
+  return `${proto}://${host}`;
+}
+
+function buildResumeUrl(senderId, req, sendResume = true) {
+  const base = getPublicBaseUrl(req);
+  if (!base || !ADMIN_SECRET) return "";
+  const params = new URLSearchParams({ token: ADMIN_SECRET });
+  if (sendResume) params.set("sendResume", "1");
+  return `${base}/admin/handoffs/${encodeURIComponent(senderId)}/resolve?${params}`;
+}
+
+function listActiveHandoffs() {
+  const now = Date.now();
+  const handoffs = [];
+
+  for (const [senderId, session] of handoffSessions.entries()) {
+    if (now > session.expiresAt) {
+      handoffSessions.delete(senderId);
+      continue;
+    }
+    handoffs.push({
+      senderId,
+      platform: session.platform || "messenger",
+      handedOffAt: new Date(session.handedOffAt).toISOString(),
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      lastMessage: session.lastMessage,
+    });
+  }
+
+  return handoffs;
+}
+
+async function graphGet(path, accessToken = PAGE_ACCESS_TOKEN) {
+  const url = `https://graph.facebook.com/v19.0/${path}${path.includes("?") ? "&" : "?"}access_token=${accessToken}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  return { ok: response.ok, data };
+}
+
+async function fetchPageInstagramStatus() {
+  if (!PAGE_ACCESS_TOKEN) {
+    return { error: "PAGE_ACCESS_TOKEN not set on server." };
+  }
+
+  const pageIdToTry = PAGE_ID_ENV || pageId;
+  const fieldQuery =
+    "fields=instagram_business_account{id,username,name},connected_instagram_account{id,username,name},name,id";
+
+  const attempts = [];
+  if (pageIdToTry) {
+    attempts.push({
+      label: `page ${pageIdToTry}`,
+      path: `${encodeURIComponent(pageIdToTry)}?${fieldQuery}`,
+    });
+  }
+  attempts.push({ label: "me", path: `me?${fieldQuery}` });
+
+  for (const attempt of attempts) {
+    try {
+      const { ok, data } = await graphGet(attempt.path);
+      if (!ok) {
+        if (data.error?.code === 100) continue;
+        return { error: data.error?.message || JSON.stringify(data) };
+      }
+      const ig =
+        data.instagram_business_account || data.connected_instagram_account || null;
+      return {
+        page: { id: data.id, name: data.name },
+        instagram: ig,
+        instagramLinked: Boolean(ig?.id),
+        checkedVia: attempt.label,
+      };
+    } catch (err) {
+      continue;
+    }
+  }
+
+  if (INSTAGRAM_ACCOUNT_ID || INSTAGRAM_USERNAME) {
+    return {
+      page: pageIdToTry ? { id: pageIdToTry } : null,
+      instagram: {
+        id: INSTAGRAM_ACCOUNT_ID || undefined,
+        username: INSTAGRAM_USERNAME || undefined,
+      },
+      instagramLinked: true,
+      checkedVia: "env (INSTAGRAM_ACCOUNT_ID / INSTAGRAM_USERNAME)",
+      apiCheckUnavailable: true,
+      hint:
+        "Meta API lookup blocked (needs pages_read_engagement). Using env vars. IG DMs can still work if webhook is subscribed.",
+    };
+  }
+
+  return {
+    page: pageIdToTry ? { id: pageIdToTry } : null,
+    instagram: null,
+    instagramLinked: null,
+    apiCheckUnavailable: true,
+    hint:
+      "Cannot verify via Meta API without pages_read_engagement. Check Business Suite → Linked accounts. Optional on Render: PAGE_ID, INSTAGRAM_USERNAME. IG DMs still work if webhook + instagram_manage_messages are set up.",
+  };
+}
+
+// --- Health check (useful after deploy) ---
+app.get("/", (req, res) => {
+  res.send("Beantol bot is running (Facebook Messenger + Instagram DMs).");
+});
+
+// --- Admin: simple dashboard (bookmark on phone/PC) ---
+app.get("/admin", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  const handoffs = listActiveHandoffs();
+  const meta = await fetchPageInstagramStatus();
+  let leadsHtml =
+    '<p class="muted"><strong>Leads:</strong> not configured — set <code>GOOGLE_LEADS_SHEET_ID</code> on Render.</p>';
+  if (isLeadCaptureConfigured()) {
+    try {
+      const leadData = await listLeads(8);
+      const leadRows = (leadData.leads || [])
+        .map(
+          (lead) => `<tr>
+        <td>${escapeHtml(lead.updated || lead.created || "—")}</td>
+        <td>${escapeHtml(lead.teamStatus || "New")}</td>
+        <td>${escapeHtml(lead.stage || "—")}</td>
+        <td>${escapeHtml(lead.interest || "—")}</td>
+        <td>${escapeHtml(lead.phone || "—")}</td>
+        <td>${escapeHtml(lead.assignedTo || "—")}</td>
+        <td>${escapeHtml(lead.lastMessage || "—")}</td>
+      </tr>`
+        )
+        .join("");
+      leadsHtml = `<h2>Recent leads</h2>
+<p class="muted">Google Sheet · edit <strong>Team status</strong> (New / Contacted / Follow-up / Won / Lost) in Sheet · <a href="/admin/leads?token=${encodeURIComponent(req.query.token || "")}">JSON</a></p>
+${
+  leadRows
+    ? `<table><tr><th>Updated</th><th>Team status</th><th>Bot stage</th><th>Interest</th><th>Phone</th><th>Assigned</th><th>Last message</th></tr>${leadRows}</table>`
+    : "<p>No leads captured yet.</p>"
+}`;
+    } catch (err) {
+      leadsHtml = `<p class="muted"><strong>Leads:</strong> could not load (${escapeHtml(err.message)}).</p>`;
+    }
+  }
+
+  let ordersHtml =
+    '<p class="muted"><strong>Orders:</strong> not configured — uses same <code>GOOGLE_LEADS_SHEET_ID</code> with Orders tab.</p>';
+  if (isOrderCaptureConfigured()) {
+    try {
+      const orderData = await listOrders(8);
+      const orderRows = (orderData.orders || [])
+        .map(
+          (order) => `<tr>
+        <td><code>${escapeHtml(order.orderId)}</code></td>
+        <td>${escapeHtml(order.updated || order.created || "—")}</td>
+        <td>${escapeHtml(order.orderStatus || "—")}</td>
+        <td>${escapeHtml(order.paymentStatus || "—")}</td>
+        <td>${escapeHtml([order.bean, order.size].filter(Boolean).join(" ") || "—")}</td>
+        <td>${escapeHtml(order.fulfillment || "—")}</td>
+        <td>${escapeHtml(order.phone || "—")}</td>
+      </tr>`
+        )
+        .join("");
+      ordersHtml = `<h2>Recent orders</h2>
+<p class="muted">Orders tab in Sheet · edit <strong>Order status</strong> (pending / confirmed / dispatched / completed) · <a href="/admin/orders?token=${encodeURIComponent(req.query.token || "")}">JSON</a></p>
+${
+  orderRows
+    ? `<table><tr><th>Order ID</th><th>Updated</th><th>Status</th><th>Payment</th><th>Product</th><th>Fulfillment</th><th>Phone</th></tr>${orderRows}</table>`
+    : "<p>No orders captured yet.</p>"
+}`;
+    } catch (err) {
+      ordersHtml = `<p class="muted"><strong>Orders:</strong> could not load (${escapeHtml(err.message)}).</p>`;
+    }
+  }
+
+  let metaHtml;
+  if (meta.error) {
+    metaHtml = `<p class="muted"><strong>Page / Instagram:</strong> ${escapeHtml(meta.error)}</p>`;
+  } else if (meta.instagramLinked === true) {
+    const ig = meta.instagram || {};
+    const igLabel = ig.username ? `@${ig.username}` : ig.name || ig.id || "linked";
+    metaHtml = `<p class="muted"><strong>Page:</strong> ${escapeHtml(meta.page?.name || meta.page?.id || "—")} · <strong>Instagram:</strong> ${escapeHtml(igLabel)} (linked${meta.apiCheckUnavailable ? ", from env" : ""})</p>`;
+  } else if (meta.instagramLinked === false) {
+    metaHtml = `<p class="muted"><strong>Instagram:</strong> <em>not linked</em> to this Page token — link in Business Suite, then refresh PAGE_ACCESS_TOKEN on Render.</p>`;
+  } else {
+    metaHtml = `<p class="muted"><strong>Instagram link:</strong> cannot verify via API (Meta needs pages_read_engagement). Check Business Suite → Linked accounts. ${escapeHtml(meta.hint || "")}</p>`;
+  }
+
+  const rows = handoffs
+    .map((h) => {
+      const resumeUrl = buildResumeUrl(h.senderId, req, true);
+      return `<tr>
+        <td>${escapeHtml(h.platform === "instagram" ? "Instagram" : "Messenger")}</td>
+        <td><code>${h.senderId}</code></td>
+        <td>${escapeHtml(h.lastMessage)}</td>
+        <td><a href="${resumeUrl}">Resume AI</a></td>
+      </tr>`;
+    })
+    .join("");
+
+  res.type("html").send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Beantol bot admin</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:960px;margin:24px auto;padding:0 16px}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left}
+th{background:#f5f5f5}a.button{display:inline-block;margin-top:16px;padding:10px 16px;background:#2d6a4f;color:#fff;text-decoration:none;border-radius:6px}
+.muted{color:#666;font-size:14px}
+</style></head><body>
+<h1>Beantol — paused chats</h1>
+${metaHtml}
+<p class="muted">Paused count: <strong>${handoffs.length}</strong>. Tap <strong>Resume AI</strong> to clear handoff and send the customer the “assistant is back” message.</p>
+<p class="muted"><strong>#bot</strong> in Business Suite usually does <em>not</em> reach this server — use this page or the email link instead.</p>
+${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last note</th><th></th></tr>${rows}</table>` : "<p>No active handoffs.</p>"}
+<hr>
+${leadsHtml}
+<hr>
+${ordersHtml}
+<a class="button" href="/admin?token=${encodeURIComponent(req.query.token || "")}">Refresh</a>
+</body></html>`);
+});
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// --- Admin: list conversations waiting for a human ---
+app.get("/admin/handoffs", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const handoffs = listActiveHandoffs();
+  res.json({ count: handoffs.length, handoffs });
+});
+
+app.get("/admin/inventory", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { labels, unknown } = parseUnavailableProductLabels();
+  res.json({
+    unavailable: labels,
+    unknownTokens: unknown,
+    envVar: "UNAVAILABLE_PRODUCTS",
+    example: "beantol prime,brazil cerrado",
+    catalog: CATALOG_PRODUCTS.map((p) => ({
+      label: p.label,
+      keys: p.keys,
+      alternative: p.alternative,
+    })),
+    hint: "Set UNAVAILABLE_PRODUCTS on Render (comma-separated). Save to redeploy. Remove a name to mark in stock again.",
+  });
+});
+
+app.get("/admin/knowledge-status", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  res.json({
+    ...rag.getIndexStatus(),
+    googleSyncConfigured: isGoogleSyncConfigured(),
+    syncOnStartup: shouldSyncGoogleDocsOnStartup(),
+    leadCaptureConfigured: isLeadCaptureConfigured(),
+    orderCaptureConfigured: isOrderCaptureConfigured(),
+    hint: "Edit Google Docs (production) or knowledge/sources/*.md (local). After Doc edits: /admin/sync-knowledge",
+  });
+});
+
+app.get("/admin/leads", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  if (!isLeadCaptureConfigured()) {
+    return res.status(400).json({
+      error: "Lead capture not configured.",
+      hint: "Set GOOGLE_LEADS_SHEET_ID on Render and share the Sheet with your service account (Editor). Enable Google Sheets API in Cloud Console.",
+    });
+  }
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const data = await listLeads(limit);
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/orders", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  if (!isOrderCaptureConfigured()) {
+    return res.status(400).json({
+      error: "Order capture not configured.",
+      hint: "Set GOOGLE_LEADS_SHEET_ID and add an Orders tab in the Sheet. Enable Google Sheets API.",
+    });
+  }
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const data = await listOrders(limit);
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/reindex-knowledge", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  if (!openai) {
+    return res.status(503).json({ error: "OPENAI_API_KEY required to build embeddings index." });
+  }
+  try {
+    const result = await rag.rebuildIndex(openai);
+    res.json({
+      ok: true,
+      chunkCount: result.chunkCount,
+      builtAt: result.builtAt,
+      model: result.model,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/sync-knowledge", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  if (!isGoogleSyncConfigured()) {
+    return res.status(400).json({
+      error: "Google sync not configured.",
+      hint: "Set GOOGLE_SERVICE_ACCOUNT_JSON and GOOGLE_KNOWLEDGE_DOC_IDS on Render. See knowledge/README.md",
+    });
+  }
+  if (!openai) {
+    return res.status(503).json({ error: "OPENAI_API_KEY required to re-index after sync." });
+  }
+  try {
+    const sync = await syncGoogleDocs();
+    const index = await rag.rebuildIndex(openai);
+    res.json({
+      ok: true,
+      synced: sync.synced,
+      chunkCount: index.chunkCount,
+      builtAt: index.builtAt,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/meta-status", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const meta = await fetchPageInstagramStatus();
+  if (meta.error) {
+    return res.status(meta.error.includes("not set") ? 503 : 500).json({ error: meta.error });
+  }
+  res.json({
+    ...meta,
+    hint:
+      meta.hint ||
+      (meta.instagramLinked
+        ? "Instagram is linked to this Page token. Webhook must subscribe to this Instagram account for DMs."
+        : meta.instagramLinked === false
+          ? "No Instagram linked to this Page — link IG in Business Suite, then regenerate PAGE_ACCESS_TOKEN if needed."
+          : "API check inconclusive — verify in Business Suite."),
+  });
+});
+
+app.get("/admin/subscribe-webhooks", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const result = await ensureMessagingSubscriptions();
+  const status = await getMessagingSubscriptionStatus().catch((e) => ({
+    error: e.message,
+  }));
+  res.json({
+    subscribeResult: result,
+    currentSubscriptions: status,
+    hint:
+      result.hint ||
+      "If subscribe failed, set PAGE_ID on Render. For personal IG DMs (not app admins), instagram_manage_messages must be Approved in App Review.",
+  });
+});
+
+// --- Admin: send a test email (Resend or SMTP) ---
+app.get("/admin/test-email", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  if (!isEmailConfigured()) {
+    return res.status(503).json({
+      error:
+        "Email not configured. On Render, set RESEND_API_KEY (recommended). For local dev, SMTP_* also works.",
+    });
+  }
+
+  try {
+    const result = await sendAlertEmail({
+      subject: "Beantol Messenger — test email",
+      text: `If you received this, email is working via ${getEmailProvider()}.`,
+    });
+    res.json({
+      ok: true,
+      sentTo: HANDOFF_NOTIFY_EMAIL,
+      provider: result.provider,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, provider: getEmailProvider() });
+  }
+});
+
+async function resolveHandoffHandler(req, res) {
+  if (!requireAdmin(req, res)) return;
+
+  const { senderId } = req.params;
+  const removed = resolveHandoff(senderId);
+
+  if (!removed) {
+    return res.status(404).json({ error: "No active handoff for this sender." });
+  }
+
+  console.log(`Handoff resolved for ${senderId} by admin API.`);
+
+  if (req.query.sendResume === "1") {
+    try {
+      await sendMessageWithFallback(senderId, BOT_RESUME_REPLY);
+    } catch (err) {
+      console.error(`Resolve sendResume failed for ${senderId}:`, err.message);
+    }
+  }
+
+  const payload = {
+    ok: true,
+    senderId,
+    message: "Handoff cleared. Bot will auto-reply again.",
+    resumeMessageSent: req.query.sendResume === "1",
+  };
+
+  if (req.method === "GET" && !req.headers.accept?.includes("application/json")) {
+    const backUrl = `/admin?token=${encodeURIComponent(req.query.token || "")}`;
+    return res.type("html").send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Handoff cleared</title></head><body style="font-family:system-ui,sans-serif;max-width:480px;margin:40px auto;padding:0 16px">
+<h1>Handoff cleared</h1>
+<p>The AI assistant is active again for customer <code>${senderId}</code>.</p>
+<p>${req.query.sendResume === "1" ? "The customer should receive the “assistant is back” message shortly." : "Add <code>&sendResume=1</code> to the URL to send the assistant message."}</p>
+<p><a href="${backUrl}">Back to admin dashboard</a></p>
+</body></html>`);
+  }
+
+  res.json(payload);
+}
+
+// --- Admin: clear handoff (POST or GET — open GET link in browser) ---
+app.post("/admin/handoffs/:senderId/resolve", resolveHandoffHandler);
+app.get("/admin/handoffs/:senderId/resolve", resolveHandoffHandler);
+
+// --- Step 5: Facebook verifies your webhook with a GET request ---
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("Webhook verified successfully.");
+    return res.status(200).send(challenge);
+  }
+
+  console.log("Webhook verification failed.");
+  return res.sendStatus(403);
+});
+
+// --- Meta webhook: Facebook Page + Instagram DMs ---
+app.post("/webhook", (req, res) => {
+  const body = req.body || {};
+  console.log(
+    `Webhook POST received object="${body.object || "missing"}" entries=${body.entry?.length ?? 0}`
+  );
+
+  if (!isSupportedWebhookObject(body.object)) {
+    console.log(
+      `Webhook ignored — unsupported object="${body?.object || "missing"}" (expected page or instagram). Full keys: ${Object.keys(body).join(", ")}`
+    );
+    if (body.entry?.length) {
+      console.log("Webhook raw (truncated):", JSON.stringify(body).slice(0, 800));
+    }
+    return res.sendStatus(404);
+  }
+
+  // Respond immediately so Meta does not timeout
+  res.sendStatus(200);
+
+  logWebhookReceipt(body);
+
+  processWebhookEvents(body).catch((err) => {
+    console.error("Webhook processing error:", err.message);
+  });
+});
+
+function logWebhookReceipt(body) {
+  const events = collectMessagingEvents(body);
+  console.log(
+    `Webhook received object=${body.object} entries=${body.entry?.length || 0} events=${events.length}`
+  );
+  if (events.length === 0 && (body.entry?.length || 0) > 0) {
+    console.log(
+      "Webhook had entries but no messaging events — raw payload:",
+      JSON.stringify(body).slice(0, 1200)
+    );
+  }
+}
+
+function getInboundMessageText(event) {
+  if (event.postback?.payload) return String(event.postback.payload).trim();
+  if (event.postback?.title) return String(event.postback.title).trim();
+  const msg = event.message;
+  if (!msg) return "";
+  if (msg.is_deleted) return "";
+  if (msg.text) return String(msg.text).trim();
+  if (msg.quick_reply?.payload) return String(msg.quick_reply.payload).trim();
+  return "";
+}
+
+function collectMessagingEvents(body) {
+  const platform = webhookPlatform(body);
+  const items = [];
+  for (const entry of body.entry || []) {
+    for (const event of entry.messaging || []) {
+      items.push({ event, channel: "messaging", platform, entryId: entry.id });
+    }
+    for (const event of entry.standby || []) {
+      items.push({ event, channel: "standby", platform, entryId: entry.id });
+    }
+    for (const change of entry.changes || []) {
+      if (change.field !== "messages") continue;
+      const value = change.value;
+      if (!value) continue;
+      if (Array.isArray(value.messaging)) {
+        for (const event of value.messaging) {
+          items.push({
+            event,
+            channel: "changes.messaging",
+            platform,
+            entryId: entry.id,
+          });
+        }
+      } else if (value.sender?.id && (value.message || value.postback)) {
+        items.push({
+          event: value,
+          channel: "changes.messages",
+          platform,
+          entryId: entry.id,
+        });
+      }
+    }
+  }
+  return items;
+}
+
+async function ensurePageIdLoaded() {
+  if (pageId) return;
+  await loadPageId();
+}
+
+async function processWebhookEvents(body) {
+  await ensurePageIdLoaded();
+
+  for (const { event, channel, platform, entryId } of collectMessagingEvents(body)) {
+    const text = getInboundMessageText(event);
+    const hasMessage = Boolean(event.message || event.postback);
+
+    if (!hasMessage) {
+      console.log(
+        `Webhook ${platform}/${channel}: skipped — no message/postback (entry=${entryId})`
+      );
+      continue;
+    }
+
+    rememberPageIdFromEvent(event);
+
+    if (DEBUG_WEBHOOK || /#bot/i.test(text) || platform === "instagram") {
+      console.log(
+        `Webhook ${platform}/${channel}: echo=${Boolean(event.message?.is_echo)} self=${Boolean(event.message?.is_self)} sender=${event.sender?.id} recipient=${event.recipient?.id} entry=${entryId} text=${JSON.stringify(text)}`
+      );
+    }
+
+    if (isOutboundFromPage(event)) {
+      await handlePageOutbound(event);
+      continue;
+    }
+
+    if (event.message?.is_self === true) {
+      console.log(
+        `Webhook ${platform}/${channel}: skipped is_self (Meta self-test ping to your IG account)`
+      );
+      continue;
+    }
+
+    if (!text) {
+      console.log(
+        `Webhook ${platform}/${channel}: skipped — empty text (attachment or unsupported media?)`
+      );
+      continue;
+    }
+
+    if (!event.sender?.id) {
+      console.log(`Webhook ${platform}/${channel}: skipped — missing sender.id`);
+      continue;
+    }
+
+    try {
+      await handleMessage(event.sender.id, text, platform);
+    } catch (err) {
+      console.error(`Error handling ${platform} message:`, err.message);
+    }
+  }
+}
+
+async function handleMessage(senderId, userText, platform = "messenger") {
+  console.log(`Message from ${senderId} (${platformLabel(platform)}): ${userText}`);
+
+  const activeHandoff = getActiveHandoff(senderId);
+  if (activeHandoff) {
+    console.log(`Skipping auto-reply for ${senderId} — waiting for human (expires ${new Date(activeHandoff.expiresAt).toISOString()}).`);
+    return;
+  }
+
+  updateReplyLanguagePreference(senderId, userText);
+
+  if (wantsHumanHandoff(userText, senderId)) {
+    captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
+    await attemptCustomerHandoff(senderId, userText, "phrase match", platform);
+    return;
+  }
+
+  let reply;
+
+  if (!openai) {
+    reply =
+      "Bot is running but OpenAI is not configured yet. Please add OPENAI_API_KEY.";
+  } else {
+    try {
+      const history = getChatHistory(senderId);
+      const knowledgeContext = await rag.retrieveKnowledgeContext(openai, userText);
+      const systemMessages = [
+        { role: "system", content: SYSTEM_RULES },
+        { role: "system", content: getInventorySystemNote() },
+        { role: "system", content: getSupportHoursSystemNote() },
+        { role: "system", content: getReplyLanguageInstruction(senderId) },
+      ];
+      if (knowledgeContext) {
+        systemMessages.push({ role: "system", content: knowledgeContext });
+      }
+      const completion = await openai.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages: [...systemMessages, ...history, { role: "user", content: userText }],
+        max_tokens: 500,
+      });
+      reply =
+        completion.choices[0]?.message?.content?.trim() ||
+        "Sorry, I could not generate a reply. Please try again.";
+    } catch (err) {
+      console.error("OpenAI error:", err.message);
+      reply =
+        "Sorry, I am having trouble right now. Please try again in a moment.";
+    }
+  }
+
+  if (isAiHandoffReply(reply) && !isReplyLanguagePreferenceRequest(userText)) {
+    const blockHandoff =
+      isDeliveryInquiry(userText) &&
+      !wantsAgentAfterDeliveryOffer(userText) &&
+      !isDeliveryAgentOfferPending(senderId);
+    if (!blockHandoff) {
+      clearDeliveryAgentOfferPending(senderId);
+      captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
+      if (!(await attemptCustomerHandoff(senderId, userText, "AI [[HANDOFF]] marker", platform))) {
+        return;
+      }
+      return;
+    }
+  }
+
+  if (aiReplyIsDeliveryDetailsConfirmation(reply)) {
+    markDeliveryAgentOfferPending(senderId);
+    console.log(`Delivery step-2 sent for ${senderId} — YES / agent reply will handoff.`);
+  }
+
+  const deliveryTrigger = isDeliveryInquiry(userText)
+    ? "customer message"
+    : looksLikeDeliveryDetailsSubmission(userText)
+      ? "delivery details submitted"
+      : aiReplyIsDeliveryFlow(reply)
+        ? "bot delivery reply"
+        : aiReplyIsDeliveryDetailsConfirmation(reply)
+          ? "delivery details confirmed"
+          : null;
+
+  if (deliveryTrigger) {
+    console.log(`Delivery alert for ${senderId} (${deliveryTrigger}, ${platform}).`);
+    await notifyDeliveryByEmail(senderId, userText, deliveryTrigger, platform);
+  }
+
+  const isDeliveryDetails = looksLikeDeliveryDetailsSubmission(userText);
+  const isOrderIntent = ORDER_INTENT_PATTERN.test(userText);
+
+  captureLeadFromMessage(senderId, userText, platform, {
+    isDeliveryInquiry: isDeliveryInquiry(userText),
+    isDeliveryDetails,
+    deliveryTrigger,
+  });
+
+  captureOrderFromMessage(senderId, userText, platform, {
+    isDeliveryDetails,
+    isOrderIntent,
+  });
+
+  if (openai) {
+    appendChatHistory(senderId, userText, reply);
+  }
+
+  try {
+    await sendMessage(senderId, sanitizeBotReply(reply));
+  } catch (err) {
+    console.error(`Send failed for ${senderId} (${platformLabel(platform)}):`, err.message);
+    throw err;
+  }
+}
+
+async function sendMessage(recipientId, text, options = {}) {
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+  const payload = {
+    recipient: { id: recipientId },
+    message: { text },
+  };
+
+  if (options.tag) {
+    payload.messaging_type = "MESSAGE_TAG";
+    payload.tag = options.tag;
+  } else {
+    payload.messaging_type = options.messagingType || "RESPONSE";
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error(
+      `Meta Send API error (HTTP ${response.status}):`,
+      JSON.stringify(data)
+    );
+    throw new Error(data.error?.message || "Failed to send message");
+  }
+
+  rememberBotMessageId(data.message_id);
+  console.log(`Reply sent to ${recipientId}`);
+  return data;
+}
+
+/** After a human replied, Meta may require a message tag for the next automated send. */
+async function sendMessageWithFallback(recipientId, text) {
+  const attempts = [
+    { label: "RESPONSE", opts: { messagingType: "RESPONSE" } },
+    { label: "HUMAN_AGENT", opts: { tag: "HUMAN_AGENT" } },
+    { label: "ACCOUNT_UPDATE", opts: { tag: "ACCOUNT_UPDATE" } },
+  ];
+
+  let lastError;
+  for (const { label, opts } of attempts) {
+    try {
+      return await sendMessage(recipientId, text, opts);
+    } catch (err) {
+      lastError = err;
+      console.warn(`Send ${label} failed for ${recipientId}:`, err.message);
+    }
+  }
+
+  throw lastError || new Error("All send attempts failed");
+}
+
+// --- Startup checks ---
+function checkConfig() {
+  const missing = [];
+  if (!VERIFY_TOKEN) missing.push("VERIFY_TOKEN");
+  if (!PAGE_ACCESS_TOKEN) missing.push("PAGE_ACCESS_TOKEN");
+  if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY (bot will send a placeholder reply)");
+  if (!ADMIN_SECRET) missing.push("ADMIN_SECRET (admin handoff endpoints disabled)");
+  if (!isEmailConfigured()) {
+    missing.push(
+      "RESEND_API_KEY (recommended on Render) or SMTP_HOST / SMTP_USER / SMTP_PASS"
+    );
+  }
+  if (!PUBLIC_BASE_URL) {
+    missing.push("PUBLIC_BASE_URL (one-click resume links in email/admin, e.g. https://beantol-bot.onrender.com)");
+  }
+
+  if (missing.length) {
+    console.warn("Missing env vars:", missing.join(", "));
+  }
+
+  const { labels, unknown } = parseUnavailableProductLabels();
+  if (labels.length) {
+    console.log(`Out of stock (UNAVAILABLE_PRODUCTS): ${labels.join(", ")}`);
+  } else {
+    console.log("Inventory: all catalog products treated as available (UNAVAILABLE_PRODUCTS not set).");
+  }
+  if (unknown.length) {
+    console.warn("Unknown UNAVAILABLE_PRODUCTS tokens:", unknown.join(", "));
+  }
+}
+
+async function verifyEmailOnStartup() {
+  const provider = getEmailProvider();
+  if (!provider) return;
+
+  if (provider === "resend") {
+    console.log(
+      `Email via Resend — alerts go to ${HANDOFF_NOTIFY_EMAIL} (from ${EMAIL_FROM})`
+    );
+    return;
+  }
+
+  const transporter = getMailTransporter();
+  if (!transporter) return;
+  try {
+    await transporter.verify();
+    console.log(
+      `Email via SMTP — alerts go to ${HANDOFF_NOTIFY_EMAIL} (may fail on Render due to blocked ports)`
+    );
+  } catch (err) {
+    console.error(
+      `SMTP verify failed (${err.message}). Use RESEND_API_KEY on Render instead.`
+    );
+  }
+}
+
+async function loadPageId() {
+  if (PAGE_ID_ENV) {
+    pageId = String(PAGE_ID_ENV);
+    if (isLikelyInstagramAccountId(pageId)) {
+      console.warn(
+        `PAGE_ID env looks like Instagram ID (${pageId}), not Facebook Page ID. Use Page → About → Page ID (e.g. 124972487369170).`
+      );
+    } else {
+      console.log(`Page ID from PAGE_ID env: ${pageId}`);
+    }
+    return;
+  }
+  if (!PAGE_ACCESS_TOKEN) return;
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/v19.0/me?fields=id&access_token=${PAGE_ACCESS_TOKEN}`
+    );
+    const data = await response.json();
+    if (data.id) {
+      pageId = String(data.id);
+      console.log(`Page ID loaded from API: ${pageId}`);
+      return;
+    }
+    console.log(
+      "Page ID API lookup not available (permission not required). Set PAGE_ID on Render for IG webhook subscribe."
+    );
+    if (DEBUG_WEBHOOK) {
+      console.log("loadPageId response:", JSON.stringify(data));
+    }
+  } catch (err) {
+    console.log("Page ID API lookup skipped:", err.message);
+  }
+}
+
+const DEFAULT_SUBSCRIBED_FIELD_SETS = ["messages", "messages,messaging_postbacks"];
+
+function getSubscribedFieldAttempts() {
+  if (process.env.WEBHOOK_SUBSCRIBED_FIELDS) {
+    return [process.env.WEBHOOK_SUBSCRIBED_FIELDS.trim()];
+  }
+  return DEFAULT_SUBSCRIBED_FIELD_SETS;
+}
+
+function isLikelyInstagramAccountId(id) {
+  const s = String(id || "");
+  return s.startsWith("178414") || s.startsWith("17841");
+}
+
+function validatePageIdForApi(pageIdValue) {
+  if (!pageIdValue) return { valid: false, reason: "missing" };
+  if (isLikelyInstagramAccountId(pageIdValue)) {
+    return {
+      valid: false,
+      reason:
+        "PAGE_ID looks like an Instagram account ID (178414...). Use your Facebook Page ID from Page → About (you previously had success with 124972487369170).",
+    };
+  }
+  return { valid: true };
+}
+
+async function subscribePageApps(pageId, subscribedFields) {
+  const response = await fetch(
+    `https://graph.facebook.com/v19.0/${encodeURIComponent(pageId)}/subscribed_apps?subscribed_fields=${encodeURIComponent(subscribedFields)}&access_token=${PAGE_ACCESS_TOKEN}`,
+    { method: "POST" }
+  );
+  const data = await response.json();
+  return { ok: response.ok && data.success === true, data, subscribedFields };
+}
+
+/** Meta often requires this for Instagram DMs to hit your webhook (not only Business Suite). */
+async function ensureMessagingSubscriptions() {
+  const pid = PAGE_ID_ENV || pageId;
+  if (!pid || !PAGE_ACCESS_TOKEN) {
+    console.log(
+      "Messaging subscription skipped — set PAGE_ID on Render, redeploy, then /admin/subscribe-webhooks?token=..."
+    );
+    return { skipped: true, reason: "PAGE_ID or PAGE_ACCESS_TOKEN missing" };
+  }
+
+  const pageCheck = validatePageIdForApi(pid);
+  if (!pageCheck.valid) {
+    console.warn(`PAGE_ID invalid for subscribed_apps: ${pageCheck.reason}`);
+    return { ok: false, pageId: pid, skipped: true, reason: pageCheck.reason };
+  }
+
+  const attempts = [];
+  for (const fields of getSubscribedFieldAttempts()) {
+    if (!fields) continue;
+    try {
+      const result = await subscribePageApps(pid, fields);
+      attempts.push(result);
+      if (result.ok) {
+        console.log(
+          `Page ${pid} subscribed_apps OK (${fields}) — required for IG + Messenger webhooks.`
+        );
+        return { ok: true, pageId: pid, subscribedFields: fields, data: result.data, attempts };
+      }
+      const err = result.data?.error;
+      console.warn(
+        `Page subscribed_apps failed for fields=${fields}:`,
+        JSON.stringify(result.data)
+      );
+      if (err?.code === 100 && String(err.message || "").includes("message_echoes")) {
+        console.warn(
+          "Remove message_echoes from WEBHOOK_SUBSCRIBED_FIELDS on Render — enable echoes in Meta webhook UI instead."
+        );
+      }
+    } catch (err) {
+      attempts.push({ ok: false, subscribedFields: fields, error: err.message });
+      console.warn(`Page subscribed_apps error for fields=${fields}:`, err.message);
+    }
+  }
+
+  const last = attempts[attempts.length - 1];
+  return {
+    ok: false,
+    pageId: pid,
+    attempts,
+    data: last?.data,
+    hint:
+      "Meta error (#1) is often temporary — retry /admin/subscribe-webhooks in a few minutes. If you already saw success:true once, subscription may be active. Regenerate PAGE_ACCESS_TOKEN if it keeps failing. Do not set WEBHOOK_SUBSCRIBED_FIELDS=message_echoes on Render.",
+  };
+}
+
+async function getMessagingSubscriptionStatus() {
+  const pid = PAGE_ID_ENV || pageId;
+  if (!pid || !PAGE_ACCESS_TOKEN) {
+    return { error: "PAGE_ID or PAGE_ACCESS_TOKEN missing" };
+  }
+  const response = await fetch(
+    `https://graph.facebook.com/v19.0/${encodeURIComponent(pid)}/subscribed_apps?access_token=${PAGE_ACCESS_TOKEN}`
+  );
+  const data = await response.json();
+  return { pageId: pid, data };
+}
+
+(async function startServer() {
+  checkConfig();
+  verifyEmailOnStartup().catch(() => {});
+  try {
+    await bootstrapKnowledge();
+  } catch (err) {
+    console.warn("Knowledge bootstrap:", err.message);
+  }
+  loadPageId()
+    .catch(() => {})
+    .then(() => ensureMessagingSubscriptions());
+
+  app.listen(PORT, () => {
+    console.log(`Beantol bot listening on port ${PORT}`);
+    console.log(`Webhook URL path: /webhook (Facebook Page + Instagram)`);
+    console.log(
+      `RAG: ${rag.isReady() ? "index loaded" : "source-file fallback until indexed"}${
+        isGoogleSyncConfigured()
+          ? shouldSyncGoogleDocsOnStartup()
+            ? " | Google Doc sync on startup: ON"
+            : " | Google Doc sync on startup: OFF (RAG_SYNC_ON_STARTUP=false)"
+          : ""
+      }`
+    );
+    console.log(
+      `Leads: ${isLeadCaptureConfigured() ? "Google Sheet capture ON" : "not configured (set GOOGLE_LEADS_SHEET_ID)"}`
+    );
+    console.log(
+      `Orders: ${isOrderCaptureConfigured() ? "Google Sheet Orders tab ON" : "not configured"}`
+    );
+  });
+})();
