@@ -374,6 +374,51 @@ function getReplyLanguageInstruction(senderId) {
   );
 }
 
+const SIZE_IN_TEXT = /\b(250g|500g|1kg|6\s*kg|wholesale)\b/i;
+
+function isAffirmativeWithoutSize(text) {
+  const t = String(text || "").trim();
+  if (!t || SIZE_IN_TEXT.test(t)) return false;
+  if (
+    /^(yes|yeah|yep|yup|sure|ok(?:ay)?|oo|oo po|yes po|yes please|yes pls|pls|please|go ahead|sige|go|opo|po)$/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  return /^(yes|yeah|sure|ok|oo|yep)\b/i.test(t) && t.length <= 40;
+}
+
+function lastAssistantAskedForSize(senderId) {
+  const history = getChatHistory(senderId);
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role !== "assistant") continue;
+    const content = history[i].content || "";
+    if (/\bwhich size\b/i.test(content)) return true;
+    if (/\bwhat size\b/i.test(content)) return true;
+    if (
+      /\bplace an order\b/i.test(content) &&
+      /\b(250g|500g|1kg)\b/.test(content) &&
+      /\?/.test(content)
+    ) {
+      return true;
+    }
+    break;
+  }
+  return false;
+}
+
+function buildPendingSizeConfirmationNote(senderId, userText) {
+  if (!isAffirmativeWithoutSize(userText) || !lastAssistantAskedForSize(senderId)) {
+    return "";
+  }
+  return (
+    "ORDER SIZE REQUIRED: You asked which size. The customer replied affirmatively but did NOT choose " +
+    "250g, 500g, 1kg, or wholesale. Ask which size they want — do NOT assume 250g or any default. " +
+    "Do not summarize an order with a size until they choose one."
+  );
+}
+
 const openai = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY })
   : null;
@@ -914,6 +959,10 @@ async function captureQuoteFromMessage(senderId, userText, platform, assistantRe
   const historyTexts = recentUserMessages(senderId, 8);
   const signal = analyzeLeadSignal(userText, { historyTexts });
   if (!signal) return null;
+
+  if (isAffirmativeWithoutSize(userText) && lastAssistantAskedForSize(senderId)) {
+    return null;
+  }
 
   const explicit = /\b(?:formal quote|send (?:me )?(?:a )?quote|quotation|price quote)\b/i.test(
     userText
@@ -2552,6 +2601,10 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       }
       if (knowledgeContext) {
         systemMessages.push({ role: "system", content: knowledgeContext });
+      }
+      const sizeNote = buildPendingSizeConfirmationNote(senderId, userText);
+      if (sizeNote) {
+        systemMessages.push({ role: "system", content: sizeNote });
       }
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
