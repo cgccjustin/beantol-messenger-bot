@@ -1,31 +1,34 @@
 # Beantol bot knowledge base
 
-Business facts for RAG (pricing, FAQ, products, team). **Behavior rules** (handoff, delivery steps, formatting) stay in `system-rules.js`.
+Business facts for RAG (pricing, FAQ, products). **Behavior rules** (handoff, delivery steps, formatting) stay in `system-rules.js`.
+
+## Folders
+
+| Folder | Purpose |
+|--------|---------|
+| `sources/` | **Indexed content** — synced `*.txt` from Google Docs (created on Render at runtime). Local dev: optional `*.md` files. |
+| `templates/` | **Not indexed** — backup copy for pasting into Google Docs (`beantol-knowledge-base.md`). |
+
+When Google Docs sync is configured, the bot indexes **only** `sources/*.txt` (not repo `.md` files), so you do not get duplicate knowledge.
 
 ## Edit content
 
 ### Option A — Google Docs (recommended for team)
 
-1. Create Google Doc(s) with your Beantol info (use headings like `## Pricing`, `## FAQ`).
-2. [Google Cloud Console](https://console.cloud.google.com/) → create project → enable **Google Drive API**.
-3. Create a **service account** → download JSON key.
-4. **Share each Doc** with the service account email (`client_email` in JSON) as **Viewer**.
-5. Copy the Doc ID from the URL: `https://docs.google.com/document/d/DOC_ID/edit`
-6. On Render, set:
-   - `GOOGLE_SERVICE_ACCOUNT_JSON` = entire JSON file as one line
-   - `GOOGLE_KNOWLEDGE_DOC_IDS` = `DOC_ID:beantol-knowledge` (comma-separated for multiple docs)
-7. Sync: open `/admin/sync-knowledge?token=ADMIN_SECRET` or run `npm run sync-knowledge` locally.
+1. Edit your Beantol Google Doc (template backup in `templates/beantol-knowledge-base.md`).
+2. Ensure Render has `GOOGLE_SERVICE_ACCOUNT_JSON` and `GOOGLE_KNOWLEDGE_DOC_IDS`.
+3. After edits: save the Doc, then either:
+   - **Wait for next Render restart** — Google sync runs automatically on startup, or
+   - **Manual sync:** `GET /admin/sync-knowledge?token=ADMIN_SECRET`
 
-Synced text is saved to `knowledge/sources/*.txt` and re-indexed.
+Setup (one time): [Google Cloud Console](https://console.cloud.google.com/) → Drive API → service account → share Doc with service account email as **Viewer**. Doc ID from URL: `https://docs.google.com/document/d/DOC_ID/edit`
 
-### Option B — Files in this repo
+### Option B — Files in this repo (local dev without Google)
 
-Edit `knowledge/sources/*.md` directly, then:
+Add `*.md` files under `knowledge/sources/`, then:
 
 ```bash
 npm run index-knowledge
-git add knowledge/
-git push
 ```
 
 ## How the bot uses this
@@ -33,7 +36,7 @@ git push
 1. Each customer message → search knowledge index for relevant chunks (RAG).
 2. Chunks + behavior rules + inventory + support hours → OpenAI reply.
 
-If `index.json` is missing, the bot still works using full source files as fallback until you run `index-knowledge`.
+On startup with Google configured: sync Docs → re-index automatically (unless `RAG_SYNC_ON_STARTUP=false`).
 
 ## Commands
 
@@ -45,6 +48,6 @@ If `index.json` is missing, the bot still works using full source files as fallb
 
 ## Admin URLs (production)
 
-- `GET /admin/knowledge-status?token=...` — index status
+- `GET /admin/knowledge-status?token=...` — index status, `syncOnStartup` flag
 - `GET /admin/sync-knowledge?token=...` — Google sync + re-index
 - `GET /admin/reindex-knowledge?token=...` — re-index local sources only
