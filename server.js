@@ -26,6 +26,7 @@ const {
   recordOrder,
   listOrders,
 } = require("./lib/orders");
+const { resolveCustomerDisplayName } = require("./lib/meta-profile");
 
 const app = express();
 app.use(express.json());
@@ -809,16 +810,18 @@ function recentUserMessages(senderId, limit = 5) {
 function queueLeadCapture(payload) {
   if (!isLeadCaptureConfigured()) return;
 
-  recordLead(payload)
-    .then((result) => {
-      if (!result?.ok || !result.notify) return;
-      notifyLeadByEmail(result.lead, result.isNew).catch((err) => {
-        console.error("Lead alert email failed:", err.message);
-      });
-    })
-    .catch((err) => {
-      console.warn("Lead capture failed:", err.message);
-    });
+  (async () => {
+    const profileName = await resolveCustomerDisplayName(
+      payload.senderId,
+      payload.platform
+    );
+    const name = payload.name || profileName || "";
+    const result = await recordLead({ ...payload, name });
+    if (!result?.ok || !result.notify) return;
+    await notifyLeadByEmail(result.lead, result.isNew);
+  })().catch((err) => {
+    console.warn("Lead capture failed:", err.message);
+  });
 }
 
 function captureLeadFromMessage(senderId, userText, platform, options = {}) {
@@ -843,16 +846,18 @@ function captureLeadFromMessage(senderId, userText, platform, options = {}) {
 function queueOrderCapture(payload) {
   if (!isOrderCaptureConfigured()) return;
 
-  recordOrder(payload)
-    .then((result) => {
-      if (!result?.ok || !result.notify) return;
-      notifyOrderByEmail(result.order, result.isNew).catch((err) => {
-        console.error("Order alert email failed:", err.message);
-      });
-    })
-    .catch((err) => {
-      console.warn("Order capture failed:", err.message);
-    });
+  (async () => {
+    const profileName = await resolveCustomerDisplayName(
+      payload.senderId,
+      payload.platform
+    );
+    const name = payload.name || profileName || "";
+    const result = await recordOrder({ ...payload, name });
+    if (!result?.ok || !result.notify) return;
+    await notifyOrderByEmail(result.order, result.isNew);
+  })().catch((err) => {
+    console.warn("Order capture failed:", err.message);
+  });
 }
 
 function captureOrderFromMessage(senderId, userText, platform, options = {}) {
@@ -1259,6 +1264,7 @@ app.get("/admin", async (req, res) => {
         .map(
           (lead) => `<tr>
         <td>${escapeHtml(lead.updated || lead.created || "—")}</td>
+        <td>${escapeHtml(lead.name || "—")}</td>
         <td>${escapeHtml(lead.teamStatus || "New")}</td>
         <td>${escapeHtml(lead.stage || "—")}</td>
         <td>${escapeHtml(lead.interest || "—")}</td>
@@ -1272,7 +1278,7 @@ app.get("/admin", async (req, res) => {
 <p class="muted">Google Sheet · edit <strong>Team status</strong> (New / Contacted / Follow-up / Won / Lost) in Sheet · <a href="/admin/leads?token=${encodeURIComponent(req.query.token || "")}">JSON</a></p>
 ${
   leadRows
-    ? `<table><tr><th>Updated</th><th>Team status</th><th>Bot stage</th><th>Interest</th><th>Phone</th><th>Assigned</th><th>Last message</th></tr>${leadRows}</table>`
+    ? `<table><tr><th>Updated</th><th>Name</th><th>Team status</th><th>Bot stage</th><th>Interest</th><th>Phone</th><th>Assigned</th><th>Last message</th></tr>${leadRows}</table>`
     : "<p>No leads captured yet.</p>"
 }`;
     } catch (err) {
@@ -1290,6 +1296,7 @@ ${
           (order) => `<tr>
         <td><code>${escapeHtml(order.orderId)}</code></td>
         <td>${escapeHtml(order.updated || order.created || "—")}</td>
+        <td>${escapeHtml(order.name || "—")}</td>
         <td>${escapeHtml(order.orderStatus || "—")}</td>
         <td>${escapeHtml(order.paymentStatus || "—")}</td>
         <td>${escapeHtml([order.bean, order.size].filter(Boolean).join(" ") || "—")}</td>
@@ -1302,7 +1309,7 @@ ${
 <p class="muted">Orders tab in Sheet · edit <strong>Order status</strong> (pending / confirmed / dispatched / completed) · <a href="/admin/orders?token=${encodeURIComponent(req.query.token || "")}">JSON</a></p>
 ${
   orderRows
-    ? `<table><tr><th>Order ID</th><th>Updated</th><th>Status</th><th>Payment</th><th>Product</th><th>Fulfillment</th><th>Phone</th></tr>${orderRows}</table>`
+    ? `<table><tr><th>Order ID</th><th>Updated</th><th>Name</th><th>Status</th><th>Payment</th><th>Product</th><th>Fulfillment</th><th>Phone</th></tr>${orderRows}</table>`
     : "<p>No orders captured yet.</p>"
 }`;
     } catch (err) {
