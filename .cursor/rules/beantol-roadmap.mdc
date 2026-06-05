@@ -18,12 +18,12 @@ When the user asks what still needs doing, what's left on the checklist, or road
 ## Sales & orders
 | Feature | Status | Where / notes |
 |---------|--------|---------------|
-| Product recommendations | PARTIAL | `BEAN RECOMMENDATIONS BY USE CASE`, SALES ASSISTANT in prompt |
-| AI sales agent | PARTIAL | Consultative selling in prompt; no deal pipeline |
+| Product recommendations | DONE | Guided 1-2-3 picker in chat, `lib/recommendations.js` |
+| AI sales agent | DONE | Sales pipeline `/admin/sales`, stale follow-up context + email |
 | Order inquiry flow | DONE | Google Sheet Orders tab, auto-capture, `/admin/orders` |
 | Delivery workflow (Maxim) | DONE | DELIVERY steps 1–3, delivery emails |
 | Quotation generation | DONE | Quote ID `QT-*`, Sheet tab, shareable `/quote/:id` page |
-| Appointment booking | NOT STARTED | — |
+| Appointment booking | DONE | Chat flow, Appointments Sheet tab, `/admin/appointments/view` |
 
 ## Human handoff & ops
 | Feature | Status | Where / notes |

@@ -14,6 +14,7 @@ const {
   analyzeLeadSignal,
   analyzeOrderSignal,
   extractName,
+  extractPhone,
   parseBeanAndSize,
   ORDER_INTENT_PATTERN,
 } = require("./lib/lead-capture");
@@ -21,6 +22,7 @@ const {
   isLeadCaptureConfigured,
   recordLead,
   listLeads,
+  findLeadRow,
   updateLeadTeamFields,
   TEAM_STATUSES,
 } = require("./lib/leads");
@@ -50,6 +52,23 @@ const {
   ARCHIVED_LEAD_STATUSES,
   ARCHIVED_ORDER_STATUSES,
 } = require("./lib/analytics");
+const {
+  processRecommendationFlow,
+  buildRecommendationSystemNote,
+} = require("./lib/recommendations");
+const {
+  listPipelineLeads,
+  buildSalesContextNote,
+  formatStaleLeadsEmail,
+  renderSalesPipelineHtml,
+} = require("./lib/sales-pipeline");
+const {
+  isAppointmentCaptureConfigured,
+  processAppointmentFlow,
+  listAppointments,
+  updateAppointmentStatus,
+  VALID_STATUSES: APPOINTMENT_STATUSES,
+} = require("./lib/appointments");
 const {
   isQuoteCaptureConfigured,
   shouldCreateQuote,
@@ -1021,6 +1040,43 @@ async function notifyLeadByEmail(lead, isNew) {
   }
 }
 
+async function notifyAppointmentByEmail(appointment) {
+  if (!isEmailConfigured() || !appointment) return false;
+
+  const channel =
+    appointment.platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
+  const adminUrl =
+    PUBLIC_BASE_URL && ADMIN_SECRET
+      ? `${PUBLIC_BASE_URL}/admin/appointments/view?token=${encodeURIComponent(ADMIN_SECRET)}`
+      : "";
+
+  try {
+    await sendAlertEmail({
+      to: LEAD_NOTIFY_EMAIL,
+      subject: `Beantol — Appointment request ${appointment.appointmentId}`,
+      text: [
+        `New appointment request on ${channel}.`,
+        "",
+        `ID: ${appointment.appointmentId}`,
+        `Type: ${appointment.type}`,
+        `Preferred: ${appointment.preferredDate} ${appointment.preferredTime}`,
+        appointment.name ? `Name: ${appointment.name}` : null,
+        appointment.phone ? `Phone: ${appointment.phone}` : null,
+        `Sender ID: ${appointment.senderId}`,
+        "",
+        adminUrl ? `View: ${adminUrl}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    console.log(`Appointment alert email sent for ${appointment.appointmentId}.`);
+    return true;
+  } catch (err) {
+    console.error("Appointment alert email failed:", err.message);
+    return false;
+  }
+}
+
 async function triggerHandoff(senderId, userText, source, platform = "messenger") {
   startHandoff(senderId, userText, platform);
   console.log(
@@ -1481,6 +1537,162 @@ app.get("/admin/analytics", async (req, res) => {
   }
 });
 
+app.get("/admin/sales/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  if (!isLeadCaptureConfigured()) {
+    return res.status(400).type("html").send(
+      renderPage({
+        title: "Sales pipeline",
+        active: "sales",
+        token,
+        body: "<p>Lead capture not configured.</p>",
+      })
+    );
+  }
+  try {
+    const data = await listLeads(200);
+    const pipeline = listPipelineLeads(data.leads || []);
+    res.type("html").send(
+      renderPage({
+        title: "Sales pipeline",
+        active: "sales",
+        token,
+        body: renderSalesPipelineHtml(pipeline, token),
+        flash: adminFlash(req),
+      })
+    );
+  } catch (err) {
+    res.status(500).type("html").send(
+      renderPage({
+        title: "Sales pipeline",
+        active: "sales",
+        token,
+        body: `<p>Could not load pipeline: ${escapeHtml(err.message)}</p>`,
+      })
+    );
+  }
+});
+
+app.get("/admin/sales/check-stale", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  if (!isEmailConfigured()) {
+    return res.redirect(
+      `/admin/sales/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent("Email not configured")}`
+    );
+  }
+  try {
+    const data = await listLeads(200);
+    const { stale } = listPipelineLeads(data.leads || []);
+    if (!stale.length) {
+      return res.redirect(
+        `/admin/sales/view?token=${encodeURIComponent(token)}&saved=1`
+      );
+    }
+    await sendAlertEmail({
+      to: LEAD_NOTIFY_EMAIL,
+      subject: `Beantol — ${stale.length} lead(s) need follow-up`,
+      text: [
+        "These leads have not progressed in 3+ days:",
+        "",
+        formatStaleLeadsEmail(stale),
+        "",
+        PUBLIC_BASE_URL && ADMIN_SECRET
+          ? `Sales pipeline: ${PUBLIC_BASE_URL}/admin/sales/view?token=${encodeURIComponent(ADMIN_SECRET)}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    res.redirect(`/admin/sales/view?token=${encodeURIComponent(token)}&saved=1`);
+  } catch (err) {
+    res.redirect(
+      `/admin/sales/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
+    );
+  }
+});
+
+app.get("/admin/appointments/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  if (!isAppointmentCaptureConfigured()) {
+    return res.status(400).type("html").send(
+      renderPage({
+        title: "Appointments",
+        active: "appointments",
+        token,
+        body: "<p>Appointments use the same Google Sheet — <strong>Appointments</strong> tab is created on first booking.</p>",
+      })
+    );
+  }
+  try {
+    const data = await listAppointments(50);
+    const rows = (data.appointments || [])
+      .map((ap) => {
+        const action = `/admin/appointments/${encodeURIComponent(ap.appointmentId)}/update?token=${encodeURIComponent(token)}`;
+        return `<tr>
+          <td><code>${escapeHtml(ap.appointmentId)}</code></td>
+          <td>${escapeHtml((ap.created || "").slice(0, 16))}</td>
+          <td>${escapeHtml(ap.name || "—")}</td>
+          <td>${escapeHtml(ap.type || "—")}</td>
+          <td>${escapeHtml(ap.preferredDate || "—")} ${escapeHtml(ap.preferredTime || "")}</td>
+          <td>${escapeHtml(ap.phone || "—")}</td>
+          <td>
+            <form class="inline-form" method="post" action="${action}">
+              <select name="status">${optionTags(APPOINTMENT_STATUSES, ap.status || "requested")}</select>
+              <input name="notes" placeholder="Notes" value="${escapeHtml(ap.notes || "")}">
+              <button class="btn btn-sm" type="submit">Save</button>
+            </form>
+          </td>
+        </tr>`;
+      })
+      .join("");
+    const body = `<p class="muted">Shop visits, cupping, and callbacks booked via chat. Mon–Fri shop hours — confirm with customer in Messenger.</p>
+${rows ? `<table><tr><th>ID</th><th>Created</th><th>Name</th><th>Type</th><th>When</th><th>Phone</th><th>Status</th></tr>${rows}</table>` : "<p>No appointments yet. Customer can say \"book a shop visit\" in chat.</p>"}`;
+    res.type("html").send(
+      renderPage({
+        title: "Appointments",
+        active: "appointments",
+        token,
+        body,
+        flash: adminFlash(req),
+      })
+    );
+  } catch (err) {
+    res.status(500).type("html").send(
+      renderPage({
+        title: "Appointments",
+        active: "appointments",
+        token,
+        body: `<p>Could not load appointments: ${escapeHtml(err.message)}</p>`,
+      })
+    );
+  }
+});
+
+app.post("/admin/appointments/:appointmentId/update", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  try {
+    const result = await updateAppointmentStatus(
+      req.params.appointmentId,
+      req.body.status,
+      req.body.notes
+    );
+    if (!result?.ok) {
+      return res.redirect(
+        `/admin/appointments/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+      );
+    }
+    res.redirect(`/admin/appointments/view?token=${encodeURIComponent(token)}&saved=1`);
+  } catch (err) {
+    res.redirect(
+      `/admin/appointments/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
+    );
+  }
+});
+
 app.get("/admin/leads/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const token = adminToken(req);
@@ -1893,6 +2105,7 @@ app.get("/admin/knowledge-status", (req, res) => {
     quoteCaptureConfigured: isQuoteCaptureConfigured(),
     inventorySheetConfigured: isInventorySheetConfigured(),
     eventsLogConfigured: isEventsLogConfigured(),
+    appointmentCaptureConfigured: isAppointmentCaptureConfigured(),
     hint: "Edit Google Docs (production) or knowledge/sources/*.md (local). After Doc edits: /admin/sync-knowledge",
   });
 });
@@ -2240,6 +2453,46 @@ async function processWebhookEvents(body) {
   }
 }
 
+async function handleStructuredFlows(senderId, userText, platform) {
+  const profileName = await resolveCustomerDisplayName(senderId, platform);
+  const phone = extractPhone(userText);
+  const name = extractName(userText) || profileName || "";
+
+  const appt = await processAppointmentFlow(senderId, userText, {
+    platform,
+    name,
+    phone,
+  });
+  if (appt.handled) {
+    captureLeadFromMessage(senderId, userText, platform);
+    if (appt.appointment) {
+      await notifyAppointmentByEmail(appt.appointment);
+    }
+    await sendMessage(senderId, sanitizeBotReply(appt.reply));
+    if (openai) appendChatHistory(senderId, userText, appt.reply);
+    return true;
+  }
+
+  const rec = processRecommendationFlow(senderId, userText);
+  if (rec.handled) {
+    queueLeadCapture({
+      senderId,
+      platform,
+      name,
+      phone,
+      interest: rec.interest || "bean recommendation",
+      stage: "browsing",
+      lastMessage: userText,
+      trigger: "product recommender",
+    });
+    await sendMessage(senderId, sanitizeBotReply(rec.reply));
+    if (openai) appendChatHistory(senderId, userText, rec.reply);
+    return true;
+  }
+
+  return false;
+}
+
 async function handleMessage(senderId, userText, platform = "messenger") {
   console.log(`Message from ${senderId} (${platformLabel(platform)}): ${userText}`);
 
@@ -2264,6 +2517,10 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     return;
   }
 
+  if (await handleStructuredFlows(senderId, userText, platform)) {
+    return;
+  }
+
   let reply;
 
   if (!openai) {
@@ -2278,7 +2535,19 @@ async function handleMessage(senderId, userText, platform = "messenger") {
         { role: "system", content: getInventorySystemNote() },
         { role: "system", content: getSupportHoursSystemNote() },
         { role: "system", content: getReplyLanguageInstruction(senderId) },
+        { role: "system", content: buildRecommendationSystemNote() },
       ];
+      if (isLeadCaptureConfigured()) {
+        try {
+          const found = await findLeadRow(senderId);
+          const salesNote = buildSalesContextNote(found?.lead);
+          if (salesNote) {
+            systemMessages.push({ role: "system", content: salesNote });
+          }
+        } catch (_) {
+          /* sales context optional */
+        }
+      }
       if (knowledgeContext) {
         systemMessages.push({ role: "system", content: knowledgeContext });
       }
@@ -2666,5 +2935,9 @@ async function getMessagingSubscriptionStatus() {
     console.log(
       `Analytics events: ${isEventsLogConfigured() ? "Google Sheet Events tab ON" : "disabled"}`
     );
+    console.log(
+      `Appointments: ${isAppointmentCaptureConfigured() ? "Google Sheet Appointments tab ON" : "not configured"}`
+    );
+    console.log("Phase 4: product recommender, sales pipeline, appointment booking ON");
   });
 })();

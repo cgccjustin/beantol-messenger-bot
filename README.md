@@ -173,7 +173,9 @@ Handoff state is stored in memory — a server **restart** clears pauses. After 
 GET https://YOUR_SERVER/admin?token=YOUR_ADMIN_SECRET
 ```
 
-Tabs: **Overview** (handoffs + stats), **Analytics** (messages, conversion, top interests), **Leads** (team status, assigned, notes — hides Won/Lost by default), **Orders** (status, payment — hides completed by default), **Quotes** (formal `QT-*` links), **Inventory** (qty, low-stock warnings, live stock).
+Tabs: **Overview**, **Analytics**, **Sales** (stale quoted leads), **Leads**, **Appointments**, **Orders**, **Quotes**, **Inventory**.
+
+**Phase 4 chat flows:** say *"recommend a bean"* (guided 1-2-3 picker), *"book a shop visit"* (appointment wizard), returning quoted customers get gentle sales follow-up in AI replies.
 
 **Formal quotes:** when a customer asks about prices, the bot may append a link like `/quote/QT-…?t=…` — printable page, also listed under Quotes.
 
