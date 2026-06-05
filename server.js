@@ -10,6 +10,12 @@ const OpenAI = require("openai");
 const { SYSTEM_RULES } = require("./system-rules");
 const rag = require("./lib/rag");
 const { syncGoogleDocs, isGoogleSyncConfigured } = require("./lib/google-docs-sync");
+const { analyzeLeadSignal } = require("./lib/lead-capture");
+const {
+  isLeadCaptureConfigured,
+  recordLead,
+  listLeads,
+} = require("./lib/leads");
 
 const app = express();
 app.use(express.json());
@@ -23,6 +29,8 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const HANDOFF_TIMEOUT_HOURS = Number(process.env.HANDOFF_TIMEOUT_HOURS || 24);
 const HANDOFF_NOTIFY_EMAIL =
   process.env.HANDOFF_NOTIFY_EMAIL || "cgccjustin@gmail.com";
+const LEAD_NOTIFY_EMAIL =
+  process.env.LEAD_NOTIFY_EMAIL || HANDOFF_NOTIFY_EMAIL;
 const DELIVERY_ALERT_COOLDOWN_MS =
   Number(process.env.DELIVERY_ALERT_COOLDOWN_MINUTES || 240) * 60 * 1000;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
@@ -734,7 +742,8 @@ async function handlePageOutbound(event) {
 
 let mailTransporter = null;
 
-async function sendAlertEmail({ subject, text }) {
+async function sendAlertEmail({ subject, text, to }) {
+  const recipient = to || HANDOFF_NOTIFY_EMAIL;
   const provider = getEmailProvider();
   if (!provider) {
     throw new Error(
@@ -751,7 +760,7 @@ async function sendAlertEmail({ subject, text }) {
       },
       body: JSON.stringify({
         from: EMAIL_FROM,
-        to: [HANDOFF_NOTIFY_EMAIL],
+        to: [recipient],
         subject,
         text,
       }),
@@ -771,11 +780,93 @@ async function sendAlertEmail({ subject, text }) {
 
   const info = await transporter.sendMail({
     from: SMTP_FROM,
-    to: HANDOFF_NOTIFY_EMAIL,
+    to: recipient,
     subject,
     text,
   });
   return { provider: "smtp", id: info.messageId };
+}
+
+function recentUserMessages(senderId, limit = 5) {
+  return getChatHistory(senderId)
+    .filter((m) => m.role === "user")
+    .map((m) => m.content)
+    .slice(-limit);
+}
+
+function queueLeadCapture(payload) {
+  if (!isLeadCaptureConfigured()) return;
+
+  recordLead(payload)
+    .then((result) => {
+      if (!result?.ok || !result.notify) return;
+      notifyLeadByEmail(result.lead, result.isNew).catch((err) => {
+        console.error("Lead alert email failed:", err.message);
+      });
+    })
+    .catch((err) => {
+      console.warn("Lead capture failed:", err.message);
+    });
+}
+
+function captureLeadFromMessage(senderId, userText, platform, options = {}) {
+  const signal = analyzeLeadSignal(userText, {
+    ...options,
+    historyTexts: recentUserMessages(senderId),
+  });
+  if (!signal) return;
+
+  queueLeadCapture({
+    senderId,
+    platform,
+    name: options.name || "",
+    phone: signal.phone || options.phone || "",
+    interest: signal.interest || "",
+    stage: signal.stage,
+    lastMessage: userText,
+    trigger: signal.trigger,
+  });
+}
+
+async function notifyLeadByEmail(lead, isNew) {
+  if (!isEmailConfigured() || !lead) return false;
+
+  const channel = lead.platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
+  const action = isNew ? "New lead" : "Lead updated";
+  const adminPanelUrl =
+    PUBLIC_BASE_URL && ADMIN_SECRET
+      ? `${PUBLIC_BASE_URL}/admin/leads?token=${encodeURIComponent(ADMIN_SECRET)}`
+      : "";
+
+  try {
+    await sendAlertEmail({
+      to: LEAD_NOTIFY_EMAIL,
+      subject: `Beantol — ${action} (${lead.stage})`,
+      text: [
+        `${action} on ${channel}.`,
+        "",
+        `Stage: ${lead.stage}`,
+        `Trigger: ${lead.trigger || "—"}`,
+        `Platform: ${channel}`,
+        `Sender ID: ${lead.senderId}`,
+        lead.name ? `Name: ${lead.name}` : null,
+        lead.phone ? `Phone: ${lead.phone}` : null,
+        lead.interest ? `Interest: ${lead.interest}` : null,
+        "",
+        `Last message: ${lead.lastMessage}`,
+        "",
+        adminPanelUrl ? `View leads: ${adminPanelUrl}` : null,
+        "Open Meta Business Suite to reply in chat.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    console.log(`Lead alert email sent for ${lead.senderId} (${lead.stage}).`);
+    return true;
+  } catch (err) {
+    console.error("Lead alert email failed:", err.message);
+    return false;
+  }
 }
 
 async function triggerHandoff(senderId, userText, source, platform = "messenger") {
@@ -1060,6 +1151,35 @@ app.get("/admin", async (req, res) => {
 
   const handoffs = listActiveHandoffs();
   const meta = await fetchPageInstagramStatus();
+  let leadsHtml =
+    '<p class="muted"><strong>Leads:</strong> not configured — set <code>GOOGLE_LEADS_SHEET_ID</code> on Render.</p>';
+  if (isLeadCaptureConfigured()) {
+    try {
+      const leadData = await listLeads(8);
+      const leadRows = (leadData.leads || [])
+        .map(
+          (lead) => `<tr>
+        <td>${escapeHtml(lead.updated || lead.created || "—")}</td>
+        <td>${escapeHtml(lead.stage || "—")}</td>
+        <td>${escapeHtml(lead.platform === "instagram" ? "Instagram" : "Messenger")}</td>
+        <td><code>${escapeHtml(lead.senderId)}</code></td>
+        <td>${escapeHtml(lead.interest || "—")}</td>
+        <td>${escapeHtml(lead.phone || "—")}</td>
+        <td>${escapeHtml(lead.lastMessage || "—")}</td>
+      </tr>`
+        )
+        .join("");
+      leadsHtml = `<h2>Recent leads</h2>
+<p class="muted">From Google Sheet · <a href="/admin/leads?token=${encodeURIComponent(req.query.token || "")}">JSON</a></p>
+${
+  leadRows
+    ? `<table><tr><th>Updated</th><th>Stage</th><th>Channel</th><th>Sender ID</th><th>Interest</th><th>Phone</th><th>Last message</th></tr>${leadRows}</table>`
+    : "<p>No leads captured yet.</p>"
+}`;
+    } catch (err) {
+      leadsHtml = `<p class="muted"><strong>Leads:</strong> could not load (${escapeHtml(err.message)}).</p>`;
+    }
+  }
   let metaHtml;
   if (meta.error) {
     metaHtml = `<p class="muted"><strong>Page / Instagram:</strong> ${escapeHtml(meta.error)}</p>`;
@@ -1099,6 +1219,8 @@ ${metaHtml}
 <p class="muted">Paused count: <strong>${handoffs.length}</strong>. Tap <strong>Resume AI</strong> to clear handoff and send the customer the “assistant is back” message.</p>
 <p class="muted"><strong>#bot</strong> in Business Suite usually does <em>not</em> reach this server — use this page or the email link instead.</p>
 ${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last note</th><th></th></tr>${rows}</table>` : "<p>No active handoffs.</p>"}
+<hr>
+${leadsHtml}
 <a class="button" href="/admin?token=${encodeURIComponent(req.query.token || "")}">Refresh</a>
 </body></html>`);
 });
@@ -1141,8 +1263,26 @@ app.get("/admin/knowledge-status", (req, res) => {
     ...rag.getIndexStatus(),
     googleSyncConfigured: isGoogleSyncConfigured(),
     syncOnStartup: shouldSyncGoogleDocsOnStartup(),
+    leadCaptureConfigured: isLeadCaptureConfigured(),
     hint: "Edit Google Docs (production) or knowledge/sources/*.md (local). After Doc edits: /admin/sync-knowledge",
   });
+});
+
+app.get("/admin/leads", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  if (!isLeadCaptureConfigured()) {
+    return res.status(400).json({
+      error: "Lead capture not configured.",
+      hint: "Set GOOGLE_LEADS_SHEET_ID on Render and share the Sheet with your service account (Editor). Enable Google Sheets API in Cloud Console.",
+    });
+  }
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const data = await listLeads(limit);
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/admin/reindex-knowledge", async (req, res) => {
@@ -1466,6 +1606,7 @@ async function handleMessage(senderId, userText, platform = "messenger") {
   updateReplyLanguagePreference(senderId, userText);
 
   if (wantsHumanHandoff(userText, senderId)) {
+    captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
     await attemptCustomerHandoff(senderId, userText, "phrase match", platform);
     return;
   }
@@ -1510,6 +1651,7 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       !isDeliveryAgentOfferPending(senderId);
     if (!blockHandoff) {
       clearDeliveryAgentOfferPending(senderId);
+      captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
       if (!(await attemptCustomerHandoff(senderId, userText, "AI [[HANDOFF]] marker", platform))) {
         return;
       }
@@ -1536,6 +1678,12 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     console.log(`Delivery alert for ${senderId} (${deliveryTrigger}, ${platform}).`);
     await notifyDeliveryByEmail(senderId, userText, deliveryTrigger, platform);
   }
+
+  captureLeadFromMessage(senderId, userText, platform, {
+    isDeliveryInquiry: isDeliveryInquiry(userText),
+    isDeliveryDetails: looksLikeDeliveryDetailsSubmission(userText),
+    deliveryTrigger,
+  });
 
   if (openai) {
     appendChatHistory(senderId, userText, reply);
@@ -1820,6 +1968,9 @@ async function getMessagingSubscriptionStatus() {
             : " | Google Doc sync on startup: OFF (RAG_SYNC_ON_STARTUP=false)"
           : ""
       }`
+    );
+    console.log(
+      `Leads: ${isLeadCaptureConfigured() ? "Google Sheet capture ON" : "not configured (set GOOGLE_LEADS_SHEET_ID)"}`
     );
   });
 })();
