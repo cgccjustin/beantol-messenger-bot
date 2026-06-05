@@ -885,6 +885,14 @@ function resolveEchoCustomerId(event, entryId = "", platform = "messenger") {
   return recipient || sender;
 }
 
+function isPageInboxAppId(appId) {
+  if (!appId) return false;
+  const id = String(appId);
+  if (id === META_PAGE_INBOX_APP_ID) return true;
+  if (id.startsWith("26390203743090")) return true;
+  return false;
+}
+
 function isBotOwnEcho(event, text = "") {
   const msg = event.message;
   if (!msg) return false;
@@ -902,9 +910,8 @@ function isHumanAdminEcho(event, text = "") {
   }
   if (isBotOwnEcho(event, text)) return false;
   const appId = getMessageAppId(event);
-  if (appId === META_PAGE_INBOX_APP_ID) return true;
+  if (isPageInboxAppId(appId)) return true;
   if (metaAppId && appId && appId !== metaAppId) return true;
-  if (!appId && !isBotOwnEcho(event, text)) return true;
   return false;
 }
 
@@ -1869,6 +1876,7 @@ app.get("/admin/handoffs/view", (req, res) => {
     "Instagram": handoffs.filter((h) => h.platform === "instagram").length,
   })}
 <p class="muted">Reply in <a href="https://business.facebook.com/latest/inbox" target="_blank" rel="noopener">Meta Business Suite inbox</a> to pause the bot. <strong>Resume AI</strong> sends the “assistant is back” message and clears the handoff for that customer.</p>
+<p class="muted"><strong>Instagram Requests:</strong> DMs from accounts that don’t follow Beantol often land in <em>Requests</em> — Meta may not notify the bot until you tap <strong>Accept</strong> in Business Suite. After accepting, the customer should message again (or you reply once manually).</p>
 ${renderHandoffsByPlatformHtml(handoffs, req)}`;
 
   res.type("html").send(
@@ -2836,6 +2844,12 @@ function logWebhookReceipt(body) {
       "Webhook had entries but no messaging events — raw payload:",
       JSON.stringify(body).slice(0, 1200)
     );
+    recordWebhookDebug({
+      kind: "no_messaging_events",
+      object: body.object,
+      entryCount: body.entry?.length || 0,
+      raw: JSON.stringify(body).slice(0, 400),
+    });
   }
 }
 
@@ -2847,7 +2861,44 @@ function getInboundMessageText(event) {
   if (msg.is_deleted) return "";
   if (msg.text) return String(msg.text).trim();
   if (msg.quick_reply?.payload) return String(msg.quick_reply.payload).trim();
+
+  if (Array.isArray(msg.attachments) && msg.attachments.length) {
+    const types = msg.attachments.map((a) => a.type).filter(Boolean);
+    if (types.includes("image")) return "[Customer sent an image]";
+    if (types.includes("video")) return "[Customer sent a video]";
+    if (types.includes("audio")) return "[Customer sent audio]";
+    if (types.includes("file")) return "[Customer sent a file]";
+    if (types.includes("share")) return "[Customer shared a post]";
+    if (types.includes("story_mention")) return "[Customer mentioned you in their story]";
+    if (types.includes("ig_reel")) return "[Customer shared a reel]";
+    return `[Customer sent ${types[0] || "an attachment"}]`;
+  }
+
+  if (msg.reply_to?.story) return "[Customer replied to your story]";
+
+  if (msg.is_unsupported) {
+    return "[Customer sent unsupported media — please type your question in text]";
+  }
+
   return "";
+}
+
+function describeSkippedWebhook(event, platform, channel, reason) {
+  const msg = event.message || {};
+  recordWebhookDebug({
+    kind: "skipped",
+    platform,
+    channel,
+    reason,
+    sender: event.sender?.id,
+    recipient: event.recipient?.id,
+    echo: isMessageEchoEvent(event),
+    isSelf: Boolean(msg.is_self),
+    isUnsupported: Boolean(msg.is_unsupported),
+    attachmentTypes: Array.isArray(msg.attachments)
+      ? msg.attachments.map((a) => a.type).join(",")
+      : "",
+  });
 }
 
 function collectMessagingEvents(body) {
@@ -2946,6 +2997,7 @@ async function processWebhookEvents(body) {
     }
 
     if (event.message?.is_self === true) {
+      describeSkippedWebhook(event, platform, channel, "is_self test ping");
       console.log(
         `Webhook ${platform}/${channel}: skipped is_self (Meta self-test ping to your IG account)`
       );
@@ -2953,6 +3005,7 @@ async function processWebhookEvents(body) {
     }
 
     if (!text) {
+      describeSkippedWebhook(event, platform, channel, "empty text / no handler");
       console.log(
         `Webhook ${platform}/${channel}: skipped — empty text (attachment or unsupported media?)`
       );
@@ -3247,11 +3300,23 @@ async function sendMessage(recipientId, text, options = {}) {
   const data = await response.json();
 
   if (!response.ok) {
+    const errMsg = data.error?.message || "Failed to send message";
+    const errCode = data.error?.code;
     console.error(
-      `Meta Send API error (HTTP ${response.status}):`,
+      `Meta Send API error (HTTP ${response.status}) to ${recipientId}:`,
       JSON.stringify(data)
     );
-    throw new Error(data.error?.message || "Failed to send message");
+    if (errCode === 10 || /outside.*window/i.test(errMsg)) {
+      console.warn(
+        `Send hint: customer may be outside the 24h messaging window — they need to message again first.`
+      );
+    }
+    if (/message request|not authorized|cannot message/i.test(errMsg)) {
+      console.warn(
+        `Send hint (Instagram): accept the DM in Business Suite → Instagram → Requests, then ask them to message again or reply manually once.`
+      );
+    }
+    throw new Error(errMsg);
   }
 
   rememberBotMessageId(data.message_id);
