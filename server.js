@@ -419,6 +419,26 @@ function buildPendingSizeConfirmationNote(senderId, userText) {
   );
 }
 
+function buildOrderCorrectionNote(userText) {
+  const t = String(userText || "").trim();
+  if (!t) return "";
+  if (
+    !/\b(?:not|instead|change|wrong|clarify|also wanted|also want|also add|add)\b/i.test(t) &&
+    !/\b(?:1kg|500g|250g)\s+(?:of\s+)?(?:santos|cerrado|prime|guji|sidama)\b/i.test(t)
+  ) {
+    return "";
+  }
+  if (!/\b(?:santos|cerrado|prime|guji|sidama|mt\.?\s*apo|ellaga|kenya)\b/i.test(t)) {
+    return "";
+  }
+  return (
+    "ORDER CORRECTION: Customer is fixing or adding items. Filter roasts (Mt. Apo, Ellaga, Guji filter, Kenya) " +
+    "are 250g retail ONLY — never 500g or 1kg (₱700 is Mt. Apo 250g). Apply a stated size only to the bean " +
+    "they name (e.g. '1kg of Santos' updates Santos only; Mt. Apo without a size stays 250g). Replace wrong " +
+    "sizes — never list the same bean twice at different sizes."
+  );
+}
+
 const openai = OPENAI_API_KEY
   ? new OpenAI({ apiKey: OPENAI_API_KEY })
   : null;
@@ -2605,6 +2625,10 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       const sizeNote = buildPendingSizeConfirmationNote(senderId, userText);
       if (sizeNote) {
         systemMessages.push({ role: "system", content: sizeNote });
+      }
+      const correctionNote = buildOrderCorrectionNote(userText);
+      if (correctionNote) {
+        systemMessages.push({ role: "system", content: correctionNote });
       }
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
