@@ -38,7 +38,7 @@ For **human handoff** and **delivery alerts** (email):
 | `RESEND_API_KEY` | **Use on Render** — from [resend.com](https://resend.com) API Keys (`re_...`) |
 | `EMAIL_FROM` | `onboarding@resend.dev` on free tier (no custom domain) |
 
-Optional: `HANDOFF_TIMEOUT_HOURS`, `DELIVERY_ALERT_COOLDOWN_MINUTES`, `OPENAI_MODEL`, `PORT`.
+Optional: `HANDOFF_ADMIN_IDLE_MINUTES` (default 15), `DELIVERY_ALERT_COOLDOWN_MINUTES`, `OPENAI_MODEL`, `PORT`.
 
 ### Email on Render (recommended: Resend)
 
@@ -136,32 +136,31 @@ Render sets `PORT` automatically; you do not need to set it.
 ## 6. How human handoff works
 
 1. Customer asks for a person (e.g. “talk to a human”, “real person”, “may tao ba?”).
-2. Bot sends one handoff message, then **stops auto-replying** for that user.
-3. Email goes to `HANDOFF_NOTIFY_EMAIL` with sender ID and their message.
-4. You reply manually in **Meta Business Suite** or the Messenger app.
-5. When done, **turn the bot back on** for that chat (see below).
+2. Bot sends one handoff message and emails `HANDOFF_NOTIFY_EMAIL` — **AI keeps answering follow-up questions** until you reply in Business Suite.
+3. When **you** send a message from **Meta Business Suite**, the bot **pauses** for that customer so you are not talking over each other.
+4. After **15 minutes** of admin idle (configurable: `HANDOFF_ADMIN_IDLE_MINUTES`), the bot auto-resumes and sends the “assistant is back” message. Chat history is preserved so the AI remembers the conversation.
 
-**Turn the bot back on (recommended):** open the admin dashboard in your browser (bookmark it):
+**Turn the bot back on early:** open the admin dashboard:
 
 ```text
 https://YOUR-RENDER-URL.onrender.com/admin?token=YOUR_ADMIN_SECRET
 ```
 
-Tap **Resume AI** for that customer — clears handoff and sends the “assistant is back” message to them.
+Tap **Resume AI** for that customer — clears handoff and sends the “assistant is back” message.
 
-Set `PUBLIC_BASE_URL=https://YOUR-RENDER-URL.onrender.com` on Render so handoff emails include the same one-click link.
+Set `PUBLIC_BASE_URL=https://YOUR-RENDER-URL.onrender.com` on Render so handoff emails include one-click resume links.
 
-**`#bot` in Business Suite** often does **not** reach the server (Meta does not send it to the webhook), so `count` stays at 1. Use the dashboard or email link instead — not `#bot`.
+**`#bot` in Business Suite** often does **not** reach the server (Meta does not send it to the webhook). Use the dashboard or email link instead.
 
-Optional: send `#bot` in chat only if Render logs show `Page outbound … resume=true` after deploy.
+**Admin takes over without customer asking for a human:** any Page/IG reply from Business Suite pauses the bot for that customer (same 15-minute idle auto-resume).
 
-**Admin takes over without customer asking for a human:** when someone on your team replies from Business Suite, the bot detects that Page message (if **message_echoes** is subscribed) and **pauses auto-replies** for that customer — so the bot and admin do not “fight” on later messages.
+**Delivery questions:** the bot explains Maxim delivery, collects address/name/phone, and emails you a **delivery alert**. It **does not hand off** — the bot stays active. If they accept a delivery rep offer, you get another delivery email; still no handoff pause.
 
-**Delivery questions:** the bot explains Maxim delivery, that the **delivery fee is paid by the customer**, and asks for complete address, contact name, and phone number. It **does not hand off** — it keeps replying in chat and emails you a **delivery alert** (bot still active). The bot pauses only when **you** reply from Business Suite.
+**Instagram message requests:** Meta has no API to auto-accept pending DMs. When a request reaches the webhook, the bot’s first API reply usually moves the thread to General. Ensure handoff is not blocking before you reply in Business Suite.
 
-If you still see a **“Call” / “Message”** button under replies, that is often from **Meta Page settings** (automated responses / action button), not from this bot — the bot sends plain text only.
+If you still see a **“Call” / “Message”** button under replies, that is often from **Meta Page settings**, not this bot.
 
-Handoff state is stored in memory — a server **restart** clears pauses. After restart, the bot may auto-reply until the customer asks for a human again.
+Handoff state is in memory — a server **restart** clears pauses. Chat history also resets on restart unless you add persistent storage later.
 
 ---
 
@@ -241,9 +240,9 @@ Push to GitHub only when **code** changes. Text-only Doc updates do **not** need
 
 1. Message your Facebook Page from a personal account.
 2. Ask something simple (“What are your hours?”) — bot should reply in English.
-3. Say “Can I talk to a real person?” — handoff message, no further bot replies, email to cgccjustin@gmail.com.
-4. Reply as the Page from Business Suite.
-5. Call resolve endpoint with that user’s sender ID when finished.
+3. Say “Can I talk to a real person?” — handoff message + email; ask a follow-up — bot should still reply.
+4. Reply as the Page from Business Suite — bot should stop auto-replying for that user.
+5. Wait 15 minutes or tap **Resume AI** in `/admin` — bot resumes with context.
 
 ---
 

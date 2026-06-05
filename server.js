@@ -98,6 +98,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const HANDOFF_TIMEOUT_HOURS = Number(process.env.HANDOFF_TIMEOUT_HOURS || 24);
+const HANDOFF_ADMIN_IDLE_MINUTES = Number(process.env.HANDOFF_ADMIN_IDLE_MINUTES || 15);
+const HANDOFF_ADMIN_IDLE_MS = HANDOFF_ADMIN_IDLE_MINUTES * 60 * 1000;
 const HANDOFF_NOTIFY_EMAIL =
   process.env.HANDOFF_NOTIFY_EMAIL || "cgccjustin@gmail.com";
 const LEAD_NOTIFY_EMAIL =
@@ -139,7 +141,7 @@ const AFTER_HOURS_HANDOFF_REPLY =
   process.env.AFTER_HOURS_HANDOFF_REPLY ||
   "Sorry — there is no customer support agent available to chat at this hour. Our team can connect with you live on Messenger daily from 9:00 AM to 9:00 PM (Philippine time). I can still help you here with questions about coffee, prices, orders, and delivery. You can also leave your message and check back during support hours, or message again between 9 AM and 9 PM when an agent can assist. How can I help you now?";
 
-/** @type {Map<string, { handedOffAt: number, expiresAt: number, lastMessage: string }>} */
+/** @type {Map<string, { mode: "agent_requested" | "admin_active", handedOffAt: number, expiresAt: number, lastMessage: string, platform: string }>} */
 const handoffSessions = new Map();
 
 /** @type {Map<string, 'en' | 'tl' | 'ceb'>} */
@@ -676,13 +678,6 @@ function wantsHumanHandoff(text, senderId) {
   const normalized = text.trim();
   if (!normalized) return false;
   if (isReplyLanguagePreferenceRequest(normalized)) return false;
-  if (
-    senderId &&
-    isDeliveryAgentOfferPending(senderId) &&
-    wantsAgentAfterDeliveryOffer(normalized)
-  ) {
-    return true;
-  }
   if (isDeliveryInquiry(normalized) && !/\b(?:person|human|agent|staff|tao|representative)\b/i.test(normalized)) {
     return false;
   }
@@ -733,26 +728,47 @@ function getEmailProvider() {
   return null;
 }
 
-function getActiveHandoff(senderId) {
-  const session = handoffSessions.get(senderId);
+function normalizeHandoffSession(session) {
   if (!session) return null;
-
-  if (Date.now() > session.expiresAt) {
-    handoffSessions.delete(senderId);
-    return null;
+  if (!session.mode) {
+    session.mode = "admin_active";
   }
-
   return session;
 }
 
-function startHandoff(senderId, userText, platform = "messenger") {
+/** Blocks AI only after an admin has replied from Business Suite. */
+function getAdminTakeover(senderId) {
+  const session = normalizeHandoffSession(handoffSessions.get(senderId));
+  if (!session || session.mode !== "admin_active") return null;
+  if (Date.now() > session.expiresAt) return null;
+  return session;
+}
+
+function getHandoffSession(senderId) {
+  return normalizeHandoffSession(handoffSessions.get(senderId));
+}
+
+function requestHumanAgent(senderId, userText, platform = "messenger") {
   clearDeliveryAgentOfferPending(senderId);
-  const existing = handoffSessions.get(senderId);
+  const existing = getHandoffSession(senderId);
   const now = Date.now();
   handoffSessions.set(senderId, {
-    handedOffAt: now,
-    expiresAt: now + HANDOFF_TIMEOUT_HOURS * 60 * 60 * 1000,
-    lastMessage: userText.trim(),
+    mode: "agent_requested",
+    handedOffAt: existing?.handedOffAt || now,
+    expiresAt: 0,
+    lastMessage: String(userText || "").trim(),
+    platform: existing?.platform || platform,
+  });
+}
+
+function activateAdminTakeover(customerId, adminText, platform = "messenger") {
+  const existing = getHandoffSession(customerId);
+  const now = Date.now();
+  handoffSessions.set(customerId, {
+    mode: "admin_active",
+    handedOffAt: existing?.handedOffAt || now,
+    expiresAt: now + HANDOFF_ADMIN_IDLE_MS,
+    lastMessage: String(adminText || existing?.lastMessage || "Admin replied").trim(),
     platform: existing?.platform || platform,
   });
 }
@@ -820,19 +836,18 @@ function isOutboundFromPage(event) {
 }
 
 /** Pause bot when a human admin replies from Business Suite (no extra customer message). */
-function pauseBotForAdminTakeover(customerId, adminText) {
+function pauseBotForAdminTakeover(customerId, adminText, platform = "messenger") {
   if (adminText && isAdminResumeCommand(adminText)) return;
-  if (getActiveHandoff(customerId)) return;
-  startHandoff(customerId, "Admin replied from Business Suite");
+  activateAdminTakeover(customerId, adminText, platform);
   console.log(
-    `Bot paused for ${customerId} — admin message detected. Auto-replies off for ${HANDOFF_TIMEOUT_HOURS}h or until admin sends ${ADMIN_RESUME_COMMANDS[0]}.`
+    `Bot paused for ${customerId} (${platformLabel(platform)}) — admin message detected. Auto-replies off for ${HANDOFF_ADMIN_IDLE_MINUTES}m idle or until Resume AI / ${ADMIN_RESUME_COMMANDS[0]}.`
   );
 }
 
 const RESUME_SEND_DELAY_MS = Number(process.env.RESUME_SEND_DELAY_MS || 1200);
 
 async function resumeBotForCustomer(customerId, adminText) {
-  const hadHandoff = Boolean(getActiveHandoff(customerId));
+  const hadHandoff = Boolean(getHandoffSession(customerId));
   resolveHandoff(customerId);
   console.log(
     `Resume command "${adminText}" for ${customerId} — handoff cleared (was paused: ${hadHandoff}).`
@@ -850,7 +865,7 @@ async function resumeBotForCustomer(customerId, adminText) {
   }
 }
 
-async function handlePageOutbound(event) {
+async function handlePageOutbound(event, platform = "messenger") {
   if (!isOutboundFromPage(event)) return;
 
   const customerId = event.recipient?.id;
@@ -867,7 +882,7 @@ async function handlePageOutbound(event) {
   if (botSentMessageIds.has(mid)) return;
 
   console.log(
-    `Page outbound → customer ${customerId}: echo=${Boolean(event.message?.is_echo)} text=${JSON.stringify(text)} resume=${isAdminResumeCommand(text)}`
+    `Page outbound → customer ${customerId}: echo=${Boolean(event.message?.is_echo)} text=${JSON.stringify(text)} resume=${isAdminResumeCommand(text)} platform=${platform}`
   );
 
   if (isAdminResumeCommand(text)) {
@@ -877,7 +892,23 @@ async function handlePageOutbound(event) {
 
   if (!text.trim()) return;
 
-  pauseBotForAdminTakeover(customerId, text);
+  pauseBotForAdminTakeover(customerId, text, platform);
+}
+
+async function expireStaleAdminTakeovers() {
+  const expired = [];
+  for (const [senderId, rawSession] of handoffSessions.entries()) {
+    const session = normalizeHandoffSession(rawSession);
+    if (!session || session.mode !== "admin_active") continue;
+    if (Date.now() <= session.expiresAt) continue;
+    expired.push(senderId);
+  }
+  for (const senderId of expired) {
+    console.log(
+      `Admin takeover idle timeout for ${senderId} (${HANDOFF_ADMIN_IDLE_MINUTES}m) — auto-resuming AI.`
+    );
+    await resumeBotForCustomer(senderId, "(auto-resume after admin idle)");
+  }
 }
 
 let mailTransporter = null;
@@ -1213,12 +1244,13 @@ async function notifyAppointmentByEmail(appointment) {
   }
 }
 
-async function triggerHandoff(senderId, userText, source, platform = "messenger") {
-  startHandoff(senderId, userText, platform);
+async function notifyAgentRequested(senderId, userText, source, platform = "messenger") {
+  requestHumanAgent(senderId, userText, platform);
   console.log(
-    `Human handoff started for ${senderId} (${source}, ${platformLabel(platform)}). Auto-replies paused for ${HANDOFF_TIMEOUT_HOURS}h or until admin resolves.`
+    `Human agent requested for ${senderId} (${source}, ${platformLabel(platform)}). AI still replies until an admin messages from Business Suite.`
   );
   await sendMessage(senderId, HANDOFF_REPLY);
+  if (openai) appendChatHistory(senderId, userText, HANDOFF_REPLY);
   notifyHandoffByEmail(senderId, userText, platform).catch((err) => {
     console.error("Handoff email failed:", err.message);
   });
@@ -1241,7 +1273,7 @@ async function attemptCustomerHandoff(
     }
     return false;
   }
-  await triggerHandoff(senderId, userText, source, platform);
+  await notifyAgentRequested(senderId, userText, source, platform);
   return true;
 }
 
@@ -1286,7 +1318,8 @@ async function notifyHandoffByEmail(senderId, userText, platform = "messenger") 
       `Sender ID: ${senderId}`,
       `Their message: ${userText}`,
       "",
-      "Bot auto-replies are paused. Reply in Meta Business Suite (Messenger or Instagram inbox), then resume the bot:",
+      "AI still answers follow-up questions until you reply in Business Suite. Once you send a message, the bot pauses for this chat.",
+      `Bot auto-resumes after ${HANDOFF_ADMIN_IDLE_MINUTES} minutes of admin idle, or use Resume AI:`,
       resumeUrl ? `Resume AI + notify customer: ${resumeUrl}` : "(Set PUBLIC_BASE_URL on Render for one-click resume links)",
       adminPanelUrl ? `All paused chats: ${adminPanelUrl}` : "",
       "",
@@ -1397,17 +1430,24 @@ function listActiveHandoffs() {
   const now = Date.now();
   const handoffs = [];
 
-  for (const [senderId, session] of handoffSessions.entries()) {
-    if (now > session.expiresAt) {
+  for (const [senderId, rawSession] of handoffSessions.entries()) {
+    const session = normalizeHandoffSession(rawSession);
+    if (!session) continue;
+    if (session.mode === "admin_active" && now > session.expiresAt) {
       handoffSessions.delete(senderId);
       continue;
     }
     handoffs.push({
       senderId,
+      mode: session.mode,
       platform: session.platform || "messenger",
       handedOffAt: new Date(session.handedOffAt).toISOString(),
-      expiresAt: new Date(session.expiresAt).toISOString(),
+      expiresAt:
+        session.mode === "admin_active" && session.expiresAt
+          ? new Date(session.expiresAt).toISOString()
+          : "",
       lastMessage: session.lastMessage,
+      aiPaused: session.mode === "admin_active",
     });
   }
 
@@ -1567,12 +1607,20 @@ app.get("/admin", async (req, res) => {
     metaHtml = `<p class="muted"><strong>Instagram:</strong> ${escapeHtml(meta.hint || "check Business Suite")}</p>`;
   }
 
+  const pausedCount = handoffs.filter((h) => h.aiPaused).length;
+  const awaitingCount = handoffs.filter((h) => h.mode === "agent_requested").length;
+
   const handoffRows = handoffs
     .map((h) => {
       const resumeUrl = buildResumeUrl(h.senderId, req, true);
+      const status =
+        h.mode === "admin_active"
+          ? `Admin chatting (AI paused${h.expiresAt ? ` · resumes ~${h.expiresAt.slice(11, 16)}` : ""})`
+          : "Awaiting you (AI still on)";
       return `<tr>
         <td>${escapeHtml(h.platform === "instagram" ? "Instagram" : "Messenger")}</td>
         <td><code>${escapeHtml(h.senderId)}</code></td>
+        <td>${escapeHtml(status)}</td>
         <td>${escapeHtml(h.lastMessage)}</td>
         <td><a href="${resumeUrl}">Resume AI</a></td>
       </tr>`;
@@ -1580,7 +1628,8 @@ app.get("/admin", async (req, res) => {
     .join("");
 
   const stats = statCards({
-    "Paused chats": handoffs.length,
+    "AI paused (admin)": pausedCount,
+    "Awaiting agent": awaitingCount,
     "New leads": isLeadCaptureConfigured() ? newLeads : "—",
     "Active orders": isOrderCaptureConfigured() ? activeOrders : "—",
     "Recent quotes": isQuoteCaptureConfigured() ? recentQuotes : "—",
@@ -1590,9 +1639,9 @@ app.get("/admin", async (req, res) => {
 ${lowStockAlert}
 ${stats}
 <p class="muted"><a href="/admin/analytics/view?token=${encodeURIComponent(token)}">Analytics dashboard →</a></p>
-<h2>Paused chats</h2>
-<p class="muted">Tap <strong>Resume AI</strong> to clear handoff. <strong>#bot</strong> in Business Suite usually does not reach this server.</p>
-${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last note</th><th></th></tr>${handoffRows}</table>` : "<p>No active handoffs.</p>"}
+<h2>Handoffs</h2>
+<p class="muted">AI keeps helping after a human request until <strong>you</strong> reply in Business Suite — then it pauses for ${HANDOFF_ADMIN_IDLE_MINUTES} minutes. Tap <strong>Resume AI</strong> to turn it back on early. <strong>#bot</strong> in Business Suite usually does not reach this server.</p>
+${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Status</th><th>Last note</th><th></th></tr>${handoffRows}</table>` : "<p>No active handoffs.</p>"}
 <p class="muted" style="margin-top:24px">Use the tabs above for leads, orders, quotes, and live inventory.</p>`;
 
   res.type("html").send(
@@ -2540,6 +2589,7 @@ async function ensurePageIdLoaded() {
 
 async function processWebhookEvents(body) {
   await ensurePageIdLoaded();
+  await expireStaleAdminTakeovers();
 
   for (const { event, channel, platform, entryId } of collectMessagingEvents(body)) {
     const text = getInboundMessageText(event);
@@ -2561,7 +2611,7 @@ async function processWebhookEvents(body) {
     }
 
     if (isOutboundFromPage(event)) {
-      await handlePageOutbound(event);
+      await handlePageOutbound(event, platform);
       continue;
     }
 
@@ -2642,13 +2692,29 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     detail: userText,
   });
 
-  const activeHandoff = getActiveHandoff(senderId);
-  if (activeHandoff) {
-    console.log(`Skipping auto-reply for ${senderId} — waiting for human (expires ${new Date(activeHandoff.expiresAt).toISOString()}).`);
+  const adminTakeover = getAdminTakeover(senderId);
+  if (adminTakeover) {
+    console.log(
+      `Skipping auto-reply for ${senderId} — admin takeover active (idle resume ${new Date(adminTakeover.expiresAt).toISOString()}).`
+    );
     return;
   }
 
   updateReplyLanguagePreference(senderId, userText);
+
+  if (isDeliveryAgentOfferPending(senderId) && wantsAgentAfterDeliveryOffer(userText)) {
+    clearDeliveryAgentOfferPending(senderId);
+    captureLeadFromMessage(senderId, userText, platform, {
+      isDeliveryInquiry: true,
+      deliveryTrigger: "delivery rep requested",
+    });
+    const confirmMsg =
+      "Noted — our team will follow up on your delivery. I can still help here with other questions.";
+    await notifyDeliveryByEmail(senderId, userText, "delivery rep requested", platform);
+    await sendMessage(senderId, confirmMsg);
+    if (openai) appendChatHistory(senderId, userText, confirmMsg);
+    return;
+  }
 
   if (wantsHumanHandoff(userText, senderId)) {
     captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
@@ -2718,11 +2784,17 @@ async function handleMessage(senderId, userText, platform = "messenger") {
   }
 
   if (isAiHandoffReply(reply) && !isReplyLanguagePreferenceRequest(userText)) {
-    const blockHandoff =
-      isDeliveryInquiry(userText) &&
-      !wantsAgentAfterDeliveryOffer(userText) &&
-      !isDeliveryAgentOfferPending(senderId);
-    if (!blockHandoff) {
+    const isDeliveryContext =
+      isDeliveryInquiry(userText) ||
+      isDeliveryAgentOfferPending(senderId) ||
+      wantsAgentAfterDeliveryOffer(userText);
+    if (isDeliveryContext) {
+      reply = reply.replace(HANDOFF_MARKER, "").trim();
+      if (!reply) {
+        reply =
+          "Noted — our team will follow up on your delivery. I can still help here with other questions.";
+      }
+    } else {
       clearDeliveryAgentOfferPending(senderId);
       captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
       if (!(await attemptCustomerHandoff(senderId, userText, "AI [[HANDOFF]] marker", platform))) {
@@ -2734,7 +2806,7 @@ async function handleMessage(senderId, userText, platform = "messenger") {
 
   if (aiReplyIsDeliveryDetailsConfirmation(reply)) {
     markDeliveryAgentOfferPending(senderId);
-    console.log(`Delivery step-2 sent for ${senderId} — YES / agent reply will handoff.`);
+    console.log(`Delivery step-2 sent for ${senderId} — YES will email team (no handoff).`);
   }
 
   const deliveryTrigger = isDeliveryInquiry(userText)
