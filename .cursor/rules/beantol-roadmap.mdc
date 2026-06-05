@@ -52,7 +52,7 @@ When the user asks what still needs doing, what's left on the checklist, or road
 ## Analytics & intelligence
 | Feature | Status | Where / notes |
 |---------|--------|---------------|
-| Analytics dashboard | NOT STARTED | No volume/conversion/top questions |
+| Analytics dashboard | DONE | `/admin/analytics/view` — messages, leads, orders, interests |
 | Business intelligence | NOT STARTED | — |
 | Advanced automations | PARTIAL | Handoff, delivery alerts, echo pause; no workflow builder |
 

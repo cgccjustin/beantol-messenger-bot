@@ -37,10 +37,19 @@ const {
   isInventorySheetConfigured,
   listInventory,
   refreshInventoryCache,
-  updateProductStatus,
+  updateProductFields,
   getCachedUnavailableLabels,
+  getCachedLowStockLabels,
+  getLowStockThreshold,
   VALID_STATUSES,
 } = require("./lib/inventory-sheet");
+const { queueLogEvent, listEvents, isEventsLogConfigured } = require("./lib/events-log");
+const {
+  computeAnalytics,
+  renderAnalyticsHtml,
+  ARCHIVED_LEAD_STATUSES,
+  ARCHIVED_ORDER_STATUSES,
+} = require("./lib/analytics");
 const {
   isQuoteCaptureConfigured,
   shouldCreateQuote,
@@ -55,6 +64,7 @@ const {
   renderPage,
   optionTags,
   statCards,
+  archiveCheckbox,
 } = require("./lib/admin-ui");
 
 const app = express();
@@ -257,6 +267,11 @@ function getInventorySystemNote() {
   }
   if (inStockLabels.length) {
     note += `IN STOCK (per admin — recommend and quote normally): ${inStockLabels.join(", ")}.\n`;
+  }
+  const lowLabels = isInventorySheetConfigured() ? getCachedLowStockLabels() : [];
+  const lowOnly = lowLabels.filter((l) => !outSet.has(l));
+  if (lowOnly.length) {
+    note += `LOW STOCK (limited quantity — still available but mention stock may run out soon; do NOT refuse orders unless customer asks): ${lowOnly.join(", ")}.\n`;
   }
   if (unknown.length) {
     note += `Unknown UNAVAILABLE_PRODUCTS tokens (fix on Render): ${unknown.join(", ")}. Valid examples: prime, beantol prime, brazil cerrado, sidama, kenya, mt apo ellaga\n`;
@@ -1303,6 +1318,7 @@ app.get("/admin", async (req, res) => {
   let newLeads = 0;
   let activeOrders = 0;
   let recentQuotes = 0;
+  let lowStockAlert = "";
 
   if (isLeadCaptureConfigured()) {
     try {
@@ -1328,6 +1344,19 @@ app.get("/admin", async (req, res) => {
     try {
       const quoteData = await listQuotes(20);
       recentQuotes = quoteData.count || 0;
+    } catch (_) {
+      /* overview still loads */
+    }
+  }
+  if (isInventorySheetConfigured()) {
+    try {
+      const inv = await listInventory();
+      const low = (inv.lowStock || []).filter(
+        (name) => !(inv.unavailable || []).includes(name)
+      );
+      if (low.length) {
+        lowStockAlert = `<div class="alert-warn"><strong>Low stock:</strong> ${escapeHtml(low.join(", "))} — <a href="/admin/inventory/view?token=${encodeURIComponent(token)}">Inventory</a></div>`;
+      }
     } catch (_) {
       /* overview still loads */
     }
@@ -1366,7 +1395,9 @@ app.get("/admin", async (req, res) => {
   });
 
   const body = `${metaHtml}
+${lowStockAlert}
 ${stats}
+<p class="muted"><a href="/admin/analytics/view?token=${encodeURIComponent(token)}">Analytics dashboard →</a></p>
 <h2>Paused chats</h2>
 <p class="muted">Tap <strong>Resume AI</strong> to clear handoff. <strong>#bot</strong> in Business Suite usually does not reach this server.</p>
 ${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last note</th><th></th></tr>${handoffRows}</table>` : "<p>No active handoffs.</p>"}
@@ -1381,6 +1412,73 @@ ${handoffs.length ? `<table><tr><th>Channel</th><th>Customer ID</th><th>Last not
       flash: adminFlash(req),
     })
   );
+});
+
+app.get("/admin/analytics/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+
+  try {
+    const [leadData, orderData, quoteData, eventData, invData] = await Promise.all([
+      isLeadCaptureConfigured() ? listLeads(200) : { leads: [] },
+      isOrderCaptureConfigured() ? listOrders(200) : { orders: [] },
+      isQuoteCaptureConfigured() ? listQuotes(200) : { quotes: [] },
+      isEventsLogConfigured() ? listEvents(1000) : { events: [] },
+      isInventorySheetConfigured() ? listInventory() : { items: [] },
+    ]);
+
+    const stats = computeAnalytics({
+      leads: leadData.leads || [],
+      orders: orderData.orders || [],
+      quotes: quoteData.quotes || [],
+      events: eventData.events || [],
+      inventory: invData.items || [],
+      handoffCount: listActiveHandoffs().length,
+    });
+
+    res.type("html").send(
+      renderPage({
+        title: "Analytics",
+        active: "analytics",
+        token,
+        body: renderAnalyticsHtml(stats),
+        flash: adminFlash(req),
+      })
+    );
+  } catch (err) {
+    res.status(500).type("html").send(
+      renderPage({
+        title: "Analytics",
+        active: "analytics",
+        token,
+        body: `<p>Could not load analytics: ${escapeHtml(err.message)}</p>`,
+      })
+    );
+  }
+});
+
+app.get("/admin/analytics", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const [leadData, orderData, quoteData, eventData, invData] = await Promise.all([
+      isLeadCaptureConfigured() ? listLeads(200) : { leads: [] },
+      isOrderCaptureConfigured() ? listOrders(200) : { orders: [] },
+      isQuoteCaptureConfigured() ? listQuotes(200) : { quotes: [] },
+      isEventsLogConfigured() ? listEvents(1000) : { events: [] },
+      isInventorySheetConfigured() ? listInventory() : { items: [] },
+    ]);
+    const stats = computeAnalytics({
+      leads: leadData.leads || [],
+      orders: orderData.orders || [],
+      quotes: quoteData.quotes || [],
+      events: eventData.events || [],
+      inventory: invData.items || [],
+      handoffCount: listActiveHandoffs().length,
+    });
+    res.json({ ok: true, ...stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/admin/leads/view", async (req, res) => {
@@ -1399,9 +1497,13 @@ app.get("/admin/leads/view", async (req, res) => {
 
   try {
     const statusFilter = req.query.status || "";
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const showArchived = req.query.archived === "1";
+    const limit = Math.min(Number(req.query.limit) || 100, 200);
     const data = await listLeads(limit);
     let leads = data.leads || [];
+    if (!showArchived) {
+      leads = leads.filter((l) => !ARCHIVED_LEAD_STATUSES.has(l.teamStatus || "New"));
+    }
     if (statusFilter) {
       leads = leads.filter((l) => (l.teamStatus || "New") === statusFilter);
     }
@@ -1409,6 +1511,7 @@ app.get("/admin/leads/view", async (req, res) => {
     const filterForm = `<form class="filters" method="get">
 <input type="hidden" name="token" value="${escapeHtml(token)}">
 <label>Team status <select name="status"><option value="">All</option>${optionTags(TEAM_STATUSES, statusFilter)}</select></label>
+${archiveCheckbox("archived", showArchived, "Show Won / Lost")}
 <button class="btn btn-sm" type="submit">Filter</button>
 <a class="muted" href="/admin/leads?token=${encodeURIComponent(token)}">JSON API</a>
 </form>`;
@@ -1438,7 +1541,7 @@ app.get("/admin/leads/view", async (req, res) => {
       .join("");
 
     const body = `${filterForm}
-<p class="muted">Showing ${leads.length} lead(s). Updates sync to Google Sheet.</p>
+<p class="muted">Showing ${leads.length} lead(s)${showArchived ? "" : " (hiding Won / Lost)"}. Updates sync to Google Sheet.</p>
 ${rows ? `<table><tr><th>Updated</th><th>Name</th><th>Bot stage</th><th>Interest</th><th>Phone</th><th>Team fields</th></tr>${rows}</table>` : "<p>No leads match this filter.</p>"}`;
 
     res.type("html").send(
@@ -1495,9 +1598,15 @@ app.get("/admin/orders/view", async (req, res) => {
 
   try {
     const statusFilter = (req.query.status || "").toLowerCase();
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const showArchived = req.query.archived === "1";
+    const limit = Math.min(Number(req.query.limit) || 100, 200);
     const data = await listOrders(limit);
     let orders = data.orders || [];
+    if (!showArchived) {
+      orders = orders.filter(
+        (o) => !ARCHIVED_ORDER_STATUSES.has(String(o.orderStatus || "").toLowerCase())
+      );
+    }
     if (statusFilter) {
       orders = orders.filter(
         (o) => String(o.orderStatus || "").toLowerCase() === statusFilter
@@ -1507,6 +1616,7 @@ app.get("/admin/orders/view", async (req, res) => {
     const filterForm = `<form class="filters" method="get">
 <input type="hidden" name="token" value="${escapeHtml(token)}">
 <label>Order status <select name="status"><option value="">All</option>${optionTags(ADMIN_ORDER_STATUSES, statusFilter)}</select></label>
+${archiveCheckbox("archived", showArchived, "Show completed / cancelled")}
 <button class="btn btn-sm" type="submit">Filter</button>
 <a class="muted" href="/admin/orders?token=${encodeURIComponent(token)}">JSON API</a>
 </form>`;
@@ -1532,7 +1642,7 @@ app.get("/admin/orders/view", async (req, res) => {
       .join("");
 
     const body = `${filterForm}
-<p class="muted">Showing ${orders.length} order(s).</p>
+<p class="muted">Showing ${orders.length} order(s)${showArchived ? "" : " (hiding completed / cancelled)"}.</p>
 ${rows ? `<table><tr><th>Order ID</th><th>Name</th><th>Product</th><th>Phone</th><th>Status & notes</th></tr>${rows}</table>` : "<p>No orders match this filter.</p>"}`;
 
     res.type("html").send(
@@ -1648,12 +1758,16 @@ app.get("/admin/inventory/view", async (req, res) => {
               ? "status-low"
               : "";
         const action = `/admin/inventory/${encodeURIComponent(item.productId)}/update?token=${encodeURIComponent(token)}`;
+        const warn =
+          item.status === "low" || (item.qty !== "" && Number(item.qty) <= getLowStockThreshold())
+            ? ' <span class="muted">⚠ low</span>'
+            : "";
         return `<tr class="${rowClass}">
-          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.name)}${warn}</td>
           <td>${escapeHtml(item.status)}</td>
-          <td>${escapeHtml(item.qty || "—")}</td>
           <td>
             <form class="inline-form" method="post" action="${action}">
+              <input class="qty-input" name="qty" type="number" min="0" step="1" placeholder="Qty" value="${escapeHtml(item.qty === "" ? "" : String(item.qty))}">
               <select name="status">${optionTags([...VALID_STATUSES], item.status)}</select>
               <input name="notes" placeholder="Notes" value="${escapeHtml(item.notes || "")}">
               <button class="btn btn-sm" type="submit">Save</button>
@@ -1662,8 +1776,8 @@ app.get("/admin/inventory/view", async (req, res) => {
         </tr>`;
       })
       .join("");
-    body = `<p class="muted">Live stock from Google Sheet <strong>Inventory</strong> tab. Changes apply to the bot within ~${process.env.INVENTORY_CACHE_MINUTES || 5} minutes (or refresh server).</p>
-${rows ? `<table><tr><th>Product</th><th>Status</th><th>Qty</th><th>Update</th></tr>${rows}</table>` : "<p>Inventory tab is seeding — refresh in a moment.</p>"}`;
+    body = `<p class="muted">Live stock from Google Sheet <strong>Inventory</strong> tab. <strong>Qty ≤ ${getLowStockThreshold()}</strong> auto-sets <em>low</em>; <strong>Qty 0</strong> sets <em>out_of_stock</em>. Bot warns customers on low stock.</p>
+${rows ? `<table><tr><th>Product</th><th>Status</th><th>Qty & update</th></tr>${rows}</table>` : "<p>Inventory tab is seeding — refresh in a moment.</p>"}`;
   } else {
     body = `<p class="muted">Sheet inventory not configured. Using <code>UNAVAILABLE_PRODUCTS</code> on Render.</p>
 <p><strong>Out of stock:</strong> ${labels.length ? escapeHtml(labels.join(", ")) : "(none)"}</p>
@@ -1682,11 +1796,11 @@ app.post("/admin/inventory/:productId/update", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const token = adminToken(req);
   try {
-    const result = await updateProductStatus(
-      req.params.productId,
-      req.body.status,
-      req.body.notes
-    );
+    const result = await updateProductFields(req.params.productId, {
+      status: req.body.status,
+      qty: req.body.qty,
+      notes: req.body.notes,
+    });
     if (!result?.ok) {
       return res.redirect(
         `/admin/inventory/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
@@ -1778,6 +1892,7 @@ app.get("/admin/knowledge-status", (req, res) => {
     orderCaptureConfigured: isOrderCaptureConfigured(),
     quoteCaptureConfigured: isQuoteCaptureConfigured(),
     inventorySheetConfigured: isInventorySheetConfigured(),
+    eventsLogConfigured: isEventsLogConfigured(),
     hint: "Edit Google Docs (production) or knowledge/sources/*.md (local). After Doc edits: /admin/sync-knowledge",
   });
 });
@@ -2127,6 +2242,13 @@ async function processWebhookEvents(body) {
 
 async function handleMessage(senderId, userText, platform = "messenger") {
   console.log(`Message from ${senderId} (${platformLabel(platform)}): ${userText}`);
+
+  queueLogEvent({
+    platform,
+    senderId,
+    event: "message",
+    detail: userText,
+  });
 
   const activeHandoff = getActiveHandoff(senderId);
   if (activeHandoff) {
@@ -2540,6 +2662,9 @@ async function getMessagingSubscriptionStatus() {
     );
     console.log(
       `Inventory: ${isInventorySheetConfigured() ? "Google Sheet Inventory tab ON" : "UNAVAILABLE_PRODUCTS env fallback"}`
+    );
+    console.log(
+      `Analytics events: ${isEventsLogConfigured() ? "Google Sheet Events tab ON" : "disabled"}`
     );
   });
 })();

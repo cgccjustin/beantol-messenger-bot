@@ -173,7 +173,7 @@ Handoff state is stored in memory — a server **restart** clears pauses. After 
 GET https://YOUR_SERVER/admin?token=YOUR_ADMIN_SECRET
 ```
 
-Tabs: **Overview** (handoffs + stats), **Leads** (team status, assigned, notes), **Orders** (status, payment, notes), **Quotes** (formal `QT-*` links), **Inventory** (live stock from Sheet).
+Tabs: **Overview** (handoffs + stats), **Analytics** (messages, conversion, top interests), **Leads** (team status, assigned, notes — hides Won/Lost by default), **Orders** (status, payment — hides completed by default), **Quotes** (formal `QT-*` links), **Inventory** (qty, low-stock warnings, live stock).
 
 **Formal quotes:** when a customer asks about prices, the bot may append a link like `/quote/QT-…?t=…` — printable page, also listed under Quotes.
 
