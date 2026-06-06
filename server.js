@@ -8,7 +8,7 @@ const express = require("express");
 const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 const { SYSTEM_RULES } = require("./system-rules");
-const { formatPeso, requestedBelowMoqBulkKg } = require("./lib/pricing");
+const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote } = require("./lib/pricing");
 const rag = require("./lib/rag");
 const { syncGoogleDocs, isGoogleSyncConfigured } = require("./lib/google-docs-sync");
 const {
@@ -81,6 +81,7 @@ const {
 const {
   processQuoteConfirmPreAi,
   processQuoteConfirmPostAi,
+  getQuoteConfirmSession,
 } = require("./lib/quote-confirm");
 const {
   escapeHtml,
@@ -3264,6 +3265,15 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       if (filterSizeNote) {
         systemMessages.push({ role: "system", content: filterSizeNote });
       }
+      const recentForPricing = recentUserMessages(senderId, 4);
+      const wholesalePricingNote = buildWholesalePricingSystemNote(
+        userText,
+        recentForPricing,
+        getQuoteConfirmSession(senderId)?.quote
+      );
+      if (wholesalePricingNote) {
+        systemMessages.push({ role: "system", content: wholesalePricingNote });
+      }
       const pendingAgent = getHandoffSession(senderId);
       if (pendingAgent?.mode === "agent_requested") {
         systemMessages.push({
@@ -3354,7 +3364,11 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       const bulkKg = /\b(\d+(?:\.\d+)?)\s*kg\b/i.test(userText)
         ? parseFloat(userText.match(/\b(\d+(?:\.\d+)?)\s*kg\b/i)[1])
         : 0;
-      const belowMoqKg = requestedBelowMoqBulkKg(userText, recentQuoteTexts);
+      const belowMoqKg = requestedBelowMoqBulkKg(
+        userText,
+        recentQuoteTexts,
+        getQuoteConfirmSession(senderId)?.quote
+      );
       const quotePost = processQuoteConfirmPostAi(senderId, userText, platform, reply, {
         signal: quoteSignal,
         name: extractName(userText) || profileName || "",
