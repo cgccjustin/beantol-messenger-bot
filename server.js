@@ -73,12 +73,15 @@ const {
 } = require("./lib/appointments");
 const {
   isQuoteCaptureConfigured,
-  shouldCreateQuote,
   recordQuote,
   listQuotes,
   getQuoteById,
   renderQuoteHtml,
 } = require("./lib/quotes");
+const {
+  processQuoteConfirmPreAi,
+  processQuoteConfirmPostAi,
+} = require("./lib/quote-confirm");
 const {
   escapeHtml,
   adminUrl,
@@ -1264,58 +1267,6 @@ function buildQuoteShareUrl(quote) {
   const base = PUBLIC_BASE_URL || "";
   if (!base) return "";
   return `${base}/quote/${encodeURIComponent(quote.quoteId)}?t=${encodeURIComponent(quote.shareToken)}`;
-}
-
-async function captureQuoteFromMessage(senderId, userText, platform, assistantReply = "") {
-  if (!isQuoteCaptureConfigured()) return null;
-
-  const historyTexts = getConversationTextsForQuote(senderId, 16);
-  const signal = analyzeLeadSignal(userText, { historyTexts: recentUserMessages(senderId, 8) });
-  if (!signal) return null;
-
-  if (isAffirmativeWithoutSize(userText) && lastAssistantAskedForSize(senderId)) {
-    return null;
-  }
-
-  const explicit = /\b(?:formal quote|send (?:me )?(?:a )?quote|quotation|price quote)\b/i.test(
-    userText
-  );
-  const wholesale = signal.stage === "wholesale";
-  if (
-    !shouldCreateQuote({
-      stage: signal.stage,
-      interest: signal.interest,
-      userText,
-      explicit,
-    })
-  ) {
-    return null;
-  }
-
-  const { bean, size } = parseBeanAndSize(signal.interest, userText, historyTexts);
-  const profileName = await resolveCustomerDisplayName(senderId, platform);
-
-  const result = await recordQuote({
-    senderId,
-    platform,
-    name: extractName(userText) || profileName || "",
-    phone: signal.phone || "",
-    interest: signal.interest || "",
-    bean,
-    size,
-    userText,
-    historyTexts,
-    assistantReply,
-    stage: signal.stage,
-    wholesale,
-  });
-
-  if (!result?.ok) return null;
-  const url = buildQuoteShareUrl(result.quote);
-  if (url) {
-    console.log(`Quote link for ${senderId}: ${result.quote.quoteId}`);
-  }
-  return url;
 }
 
 async function notifyOrderByEmail(order, isNew) {
@@ -3258,6 +3209,18 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     return;
   }
 
+  const quotePre = await processQuoteConfirmPreAi(
+    senderId,
+    userText,
+    platform,
+    PUBLIC_BASE_URL
+  );
+  if (quotePre.handled) {
+    await sendMessageWithFallback(senderId, sanitizeBotReply(quotePre.reply));
+    if (openai) appendChatHistory(senderId, userText, quotePre.reply);
+    return;
+  }
+
   let reply;
 
   if (!openai) {
@@ -3379,11 +3342,29 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     deliveryTrigger,
   });
 
-  let quoteUrl = null;
   try {
-    quoteUrl = await captureQuoteFromMessage(senderId, userText, platform, reply);
+    const quoteSignal = analyzeLeadSignal(userText, {
+      historyTexts: recentUserMessages(senderId, 8),
+    });
+    if (quoteSignal && isQuoteCaptureConfigured()) {
+      const { bean, size } = parseBeanAndSize(quoteSignal.interest, userText, [userText]);
+      const profileName = await resolveCustomerDisplayName(senderId, platform);
+      const quotePost = processQuoteConfirmPostAi(senderId, userText, platform, reply, {
+        signal: quoteSignal,
+        name: extractName(userText) || profileName || "",
+        phone: quoteSignal.phone || "",
+        interest: quoteSignal.interest || "",
+        bean,
+        size,
+        wholesale: quoteSignal.stage === "wholesale",
+        publicBaseUrl: PUBLIC_BASE_URL,
+      });
+      if (quotePost.handled && quotePost.appendConfirm) {
+        reply = `${reply}\n\n${quotePost.reply}`;
+      }
+    }
   } catch (err) {
-    console.warn("Quote capture failed:", err.message);
+    console.warn("Quote confirm failed:", err.message);
   }
 
   captureOrderFromMessage(senderId, userText, platform, {
@@ -3397,15 +3378,6 @@ async function handleMessage(senderId, userText, platform = "messenger") {
         )),
     assistantReply: reply,
   });
-
-  if (
-    quoteUrl &&
-    /\b(?:₱|peso|price|quote|magkano|tagpila|total|summary|updated order|your order)\b/i.test(
-      reply
-    )
-  ) {
-    reply = `${reply}\n\nFormal quote (save or print): ${quoteUrl}`;
-  }
 
   if (openai) {
     appendChatHistory(senderId, userText, reply);
