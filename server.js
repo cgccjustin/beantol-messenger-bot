@@ -17,7 +17,9 @@ const {
 } = require("./lib/shop-hours");
 const {
   messageHasImageAttachment,
-  isPaymentProofImageSubmission,
+  resolvePaymentProofSubmission,
+  markPaymentProofHandled,
+  shouldSuppressAfterPaymentProof,
   inboundTextForImageMessage,
   buildPaymentProofAckReply,
 } = require("./lib/payment-proof");
@@ -1179,6 +1181,16 @@ function recentUserMessages(senderId, limit = 5) {
     .filter((m) => m.role === "user")
     .map((m) => m.content)
     .slice(-limit);
+}
+
+function lastAssistantMessage(senderId) {
+  const history = getChatHistory(senderId);
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === "assistant") {
+      return history[i].content || "";
+    }
+  }
+  return "";
 }
 
 function getConversationTextsForQuote(senderId, limit = 16) {
@@ -3230,15 +3242,36 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   updateReplyLanguagePreference(senderId, userText);
 
   const hasImageAttachment = messageHasImageAttachment(messageContext.event);
+  const chatHistory = getChatHistory(senderId);
+  const recentForContext = recentUserMessages(senderId, 6);
 
-  if (
-    hasImageAttachment &&
-    isPaymentProofImageSubmission(userText, { hasImageAttachment: true })
-  ) {
+  if (shouldSuppressAfterPaymentProof(senderId)) {
+    return;
+  }
+
+  const paymentResolution = resolvePaymentProofSubmission(userText, {
+    hasImageAttachment,
+    senderId,
+    recentUserTexts: recentForContext,
+    chatHistory,
+    paymentWaitExpired: Boolean(messageContext.paymentWaitExpired),
+  });
+
+  if (paymentResolution.action === "wait_for_image") {
+    return;
+  }
+
+  if (paymentResolution.action === "ack") {
+    const pendingQuote = getQuoteConfirmSession(senderId)?.quote;
     const reply = buildPaymentProofAckReply({
       agentAvailable: isWithinLiveSupportHours(),
       isWeekend: isWeekend(),
+      quoteSummary: pendingQuote?.summary || "",
+      quoteSubtotal: pendingQuote?.subtotal ?? null,
+      hasImage: paymentResolution.hasImage !== false,
+      formatPeso,
     });
+    markPaymentProofHandled(senderId);
     captureOrderFromMessage(senderId, userText, platform, {
       isOrderIntent: true,
       isPaymentProofImage: true,
@@ -3303,7 +3336,8 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     userText,
     platform,
     PUBLIC_BASE_URL,
-    recentUserMessages(senderId, 4)
+    recentUserMessages(senderId, 4),
+    { lastAssistantReply: lastAssistantMessage(senderId) }
   );
   if (quotePre.handled) {
     await sendMessageWithFallback(senderId, sanitizeBotReply(quotePre.reply));
@@ -3333,11 +3367,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           content: getWeekendSystemNote(isWithinLiveSupportHours()),
         });
       }
-      if (hasImageAttachment) {
+      if (hasImageAttachment && paymentResolution.action === "none") {
         systemMessages.push({
           role: "system",
           content:
-            "CUSTOMER IMAGE: Customer sent an image you cannot view. Do NOT assume it is payment proof unless they explicitly said so in text (e.g. 'here's my payment', 'payment screenshot'). If unclear, say you cannot view images and ask them to confirm in text whether it is payment proof or something else. Do NOT re-pitch products or ask what they want to order.",
+            "CUSTOMER IMAGE: Customer sent an image you cannot view. Do NOT assume it is payment proof unless they explicitly said so in the same message (e.g. 'here's my payment'). If unclear, say you cannot view images and ask what they sent — do NOT ask them to confirm payment proof in a pushy way. Do NOT re-pitch products.",
         });
       }
       if (isLeadCaptureConfigured()) {
