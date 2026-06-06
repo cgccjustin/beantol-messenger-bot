@@ -3343,12 +3343,16 @@ async function handleMessage(senderId, userText, platform = "messenger") {
   });
 
   try {
+    const recentQuoteTexts = recentUserMessages(senderId, 4);
     const quoteSignal = analyzeLeadSignal(userText, {
-      historyTexts: recentUserMessages(senderId, 8),
+      historyTexts: recentQuoteTexts,
     });
     if (quoteSignal && isQuoteCaptureConfigured()) {
-      const { bean, size } = parseBeanAndSize(quoteSignal.interest, userText, [userText]);
+      const { bean, size } = parseBeanAndSize(quoteSignal.interest, userText, recentQuoteTexts);
       const profileName = await resolveCustomerDisplayName(senderId, platform);
+      const bulkKg = /\b(\d+(?:\.\d+)?)\s*kg\b/i.test(userText)
+        ? parseFloat(userText.match(/\b(\d+(?:\.\d+)?)\s*kg\b/i)[1])
+        : 0;
       const quotePost = processQuoteConfirmPostAi(senderId, userText, platform, reply, {
         signal: quoteSignal,
         name: extractName(userText) || profileName || "",
@@ -3356,8 +3360,9 @@ async function handleMessage(senderId, userText, platform = "messenger") {
         interest: quoteSignal.interest || "",
         bean,
         size,
-        wholesale: quoteSignal.stage === "wholesale",
+        wholesale: quoteSignal.stage === "wholesale" || bulkKg >= 6,
         publicBaseUrl: PUBLIC_BASE_URL,
+        recentTexts: recentQuoteTexts,
       });
       if (quotePost.handled && quotePost.appendConfirm) {
         reply = `${reply}\n\n${quotePost.reply}`;
