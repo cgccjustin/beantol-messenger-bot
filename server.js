@@ -9,6 +9,19 @@ const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 const { SYSTEM_RULES } = require("./system-rules");
 const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote } = require("./lib/pricing");
+const {
+  isWeekend,
+  getWeekendSystemNote,
+  buildWeekendDeliveryReply,
+  isWeekendDeliveryContext,
+} = require("./lib/shop-hours");
+const {
+  messageHasImageAttachment,
+  isPaymentProofImageSubmission,
+  inboundTextForImageMessage,
+  buildPaymentProofAckReply,
+} = require("./lib/payment-proof");
+const { enqueueInboundMessage } = require("./lib/inbound-debounce");
 const rag = require("./lib/rag");
 const { syncGoogleDocs, isGoogleSyncConfigured } = require("./lib/google-docs-sync");
 const {
@@ -1240,7 +1253,8 @@ function captureOrderFromMessage(senderId, userText, platform, options = {}) {
   const signal = analyzeOrderSignal(userText, {
     ...options,
     historyTexts: recentUserMessages(senderId, 8),
-    isOrderIntent,
+    isOrderIntent: options.isPaymentProofImage || isOrderIntent,
+    isPaymentProofImage: Boolean(options.isPaymentProofImage),
   });
   if (!signal) return;
 
@@ -1313,6 +1327,40 @@ async function notifyOrderByEmail(order, isNew) {
     return true;
   } catch (err) {
     console.error("Order alert email failed:", err.message);
+    return false;
+  }
+}
+
+async function notifyPaymentProofByEmail(senderId, userText, platform = "messenger") {
+  if (!isEmailConfigured()) return false;
+
+  const channel = platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
+  const adminPanelUrl =
+    PUBLIC_BASE_URL && ADMIN_SECRET
+      ? `${PUBLIC_BASE_URL}/admin/orders?token=${encodeURIComponent(ADMIN_SECRET)}`
+      : "";
+
+  try {
+    await sendAlertEmail({
+      to: ORDER_NOTIFY_EMAIL,
+      subject: "Beantol — Customer says they sent payment proof (image)",
+      text: [
+        `Customer says they sent payment proof (image attached) on ${channel}.`,
+        "",
+        `Sender ID: ${senderId}`,
+        `Message context: ${String(userText || "").slice(0, 300)}`,
+        "",
+        "Please review in chat and confirm payment in the Orders sheet.",
+        adminPanelUrl ? `View orders: ${adminPanelUrl}` : null,
+        "Open Meta Business Suite to view the image.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    });
+    console.log(`Payment proof alert email sent for ${senderId}.`);
+    return true;
+  } catch (err) {
+    console.error("Payment proof alert email failed:", err.message);
     return false;
   }
 }
@@ -3051,7 +3099,9 @@ async function processWebhookEvents(body) {
       continue;
     }
 
-    const text = getInboundMessageText(event);
+    const text = messageHasImageAttachment(event)
+      ? inboundTextForImageMessage(event)
+      : getInboundMessageText(event);
     const hasMessage = Boolean(event.message || event.postback);
 
     if (!hasMessage) {
@@ -3105,7 +3155,7 @@ async function processWebhookEvents(body) {
     }
 
     try {
-      await handleMessage(event.sender.id, text, platform);
+      enqueueInboundMessage(event.sender.id, text, platform, { event }, handleMessage);
     } catch (err) {
       console.error(`Error handling ${platform} message:`, err.message);
     }
@@ -3152,7 +3202,7 @@ async function handleStructuredFlows(senderId, userText, platform) {
   return false;
 }
 
-async function handleMessage(senderId, userText, platform = "messenger") {
+async function handleMessage(senderId, userText, platform = "messenger", messageContext = {}) {
   console.log(`Message from ${senderId} (${platformLabel(platform)}): ${userText}`);
 
   recordWebhookDebug({
@@ -3178,6 +3228,44 @@ async function handleMessage(senderId, userText, platform = "messenger") {
   }
 
   updateReplyLanguagePreference(senderId, userText);
+
+  const hasImageAttachment = messageHasImageAttachment(messageContext.event);
+
+  if (
+    hasImageAttachment &&
+    isPaymentProofImageSubmission(userText, { hasImageAttachment: true })
+  ) {
+    const reply = buildPaymentProofAckReply({
+      agentAvailable: isWithinLiveSupportHours(),
+      isWeekend: isWeekend(),
+    });
+    captureOrderFromMessage(senderId, userText, platform, {
+      isOrderIntent: true,
+      isPaymentProofImage: true,
+    });
+    notifyPaymentProofByEmail(senderId, userText, platform).catch((err) => {
+      console.warn("Payment proof email failed:", err.message);
+    });
+    await sendMessageWithFallback(senderId, sanitizeBotReply(reply));
+    if (openai) appendChatHistory(senderId, userText, reply);
+    return;
+  }
+
+  if (
+    isWeekend() &&
+    isWeekendDeliveryContext(userText, {
+      looksLikeDeliveryDetails: looksLikeDeliveryDetailsSubmission(userText),
+    })
+  ) {
+    const reply = buildWeekendDeliveryReply(isWithinLiveSupportHours());
+    captureLeadFromMessage(senderId, userText, platform, {
+      isDeliveryInquiry: true,
+      deliveryTrigger: "weekend delivery inquiry",
+    });
+    await sendMessageWithFallback(senderId, sanitizeBotReply(reply));
+    if (openai) appendChatHistory(senderId, userText, reply);
+    return;
+  }
 
   if (isDeliveryAgentOfferPending(senderId) && wantsAgentAfterDeliveryOffer(userText)) {
     clearDeliveryAgentOfferPending(senderId);
@@ -3239,6 +3327,19 @@ async function handleMessage(senderId, userText, platform = "messenger") {
         { role: "system", content: getReplyLanguageInstruction(senderId) },
         { role: "system", content: buildRecommendationSystemNote() },
       ];
+      if (isWeekend()) {
+        systemMessages.push({
+          role: "system",
+          content: getWeekendSystemNote(isWithinLiveSupportHours()),
+        });
+      }
+      if (hasImageAttachment) {
+        systemMessages.push({
+          role: "system",
+          content:
+            "CUSTOMER IMAGE: Customer sent an image you cannot view. Do NOT assume it is payment proof unless they explicitly said so in text (e.g. 'here's my payment', 'payment screenshot'). If unclear, say you cannot view images and ask them to confirm in text whether it is payment proof or something else. Do NOT re-pitch products or ask what they want to order.",
+        });
+      }
       if (isLeadCaptureConfigured()) {
         try {
           const found = await findLeadRow(senderId);
