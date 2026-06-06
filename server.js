@@ -8,7 +8,7 @@ const express = require("express");
 const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 const { SYSTEM_RULES } = require("./system-rules");
-const { formatPeso } = require("./lib/pricing");
+const { formatPeso, requestedBelowMoqBulkKg } = require("./lib/pricing");
 const rag = require("./lib/rag");
 const { syncGoogleDocs, isGoogleSyncConfigured } = require("./lib/google-docs-sync");
 const {
@@ -3213,7 +3213,8 @@ async function handleMessage(senderId, userText, platform = "messenger") {
     senderId,
     userText,
     platform,
-    PUBLIC_BASE_URL
+    PUBLIC_BASE_URL,
+    recentUserMessages(senderId, 4)
   );
   if (quotePre.handled) {
     await sendMessageWithFallback(senderId, sanitizeBotReply(quotePre.reply));
@@ -3353,6 +3354,7 @@ async function handleMessage(senderId, userText, platform = "messenger") {
       const bulkKg = /\b(\d+(?:\.\d+)?)\s*kg\b/i.test(userText)
         ? parseFloat(userText.match(/\b(\d+(?:\.\d+)?)\s*kg\b/i)[1])
         : 0;
+      const belowMoqKg = requestedBelowMoqBulkKg(userText, recentQuoteTexts);
       const quotePost = processQuoteConfirmPostAi(senderId, userText, platform, reply, {
         signal: quoteSignal,
         name: extractName(userText) || profileName || "",
@@ -3360,7 +3362,7 @@ async function handleMessage(senderId, userText, platform = "messenger") {
         interest: quoteSignal.interest || "",
         bean,
         size,
-        wholesale: quoteSignal.stage === "wholesale" || bulkKg >= 6,
+        wholesale: !belowMoqKg && (quoteSignal.stage === "wholesale" || bulkKg >= 6),
         publicBaseUrl: PUBLIC_BASE_URL,
         recentTexts: recentQuoteTexts,
       });
