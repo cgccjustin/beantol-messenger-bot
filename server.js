@@ -8,7 +8,7 @@ const express = require("express");
 const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 const { SYSTEM_RULES } = require("./system-rules");
-const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote } = require("./lib/pricing");
+const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote, buildNonWholesaleBulkSystemNote } = require("./lib/pricing");
 const {
   isWeekend,
   getWeekendSystemNote,
@@ -3401,10 +3401,19 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         systemMessages.push({ role: "system", content: filterSizeNote });
       }
       const recentForPricing = recentUserMessages(senderId, 4);
+      const sessionQuote = getQuoteConfirmSession(senderId)?.quote;
+      const nonWholesaleNote = buildNonWholesaleBulkSystemNote(
+        userText,
+        recentForPricing,
+        sessionQuote
+      );
+      if (nonWholesaleNote) {
+        systemMessages.push({ role: "system", content: nonWholesaleNote });
+      }
       const wholesalePricingNote = buildWholesalePricingSystemNote(
         userText,
         recentForPricing,
-        getQuoteConfirmSession(senderId)?.quote
+        sessionQuote
       );
       if (wholesalePricingNote) {
         systemMessages.push({ role: "system", content: wholesalePricingNote });
