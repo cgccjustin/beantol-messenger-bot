@@ -114,6 +114,11 @@ const {
   getOutsideCebuSystemNote,
 } = require("./lib/outside-cebu-delivery");
 const {
+  createWelcomeState,
+  applyWelcomeToReply,
+  welcomeOnlyReply,
+} = require("./lib/welcome");
+const {
   escapeHtml,
   adminUrl,
   renderPage,
@@ -1015,6 +1020,7 @@ function isBotGeneratedOutboundText(text) {
   if (/^How would you like to proceed\?/i.test(t)) return true;
   if (/^Great — pickup at our shop:/i.test(t)) return true;
   if (/^Delivery via Maxim — please send all three/i.test(t)) return true;
+  if (/^Welcome to Beantol/i.test(t)) return true;
   if (/^Yes — we can ship outside Cebu\./i.test(t)) return true;
   if (/^Thank you for trusting Beantol!/i.test(t)) return true;
   if (/^Thank you for your payment\./i.test(t)) return true;
@@ -1492,13 +1498,18 @@ async function notifyAppointmentByEmail(appointment) {
   }
 }
 
-async function notifyAgentRequested(senderId, userText, source, platform = "messenger") {
+async function notifyAgentRequested(
+  senderId,
+  userText,
+  source,
+  platform = "messenger",
+  welcomeState = null
+) {
   requestHumanAgent(senderId, userText, platform);
   console.log(
     `Human agent requested for ${senderId} (${source}, ${platformLabel(platform)}). AI still replies until an admin messages from Business Suite.`
   );
-  await sendMessageWithFallback(senderId, HANDOFF_REPLY);
-  if (openai) appendChatHistory(senderId, userText, HANDOFF_REPLY);
+  await deliverCustomerReply(senderId, userText, platform, HANDOFF_REPLY, welcomeState);
   notifyHandoffByEmail(senderId, userText, platform).catch((err) => {
     console.error("Handoff email failed:", err.message);
   });
@@ -1509,19 +1520,23 @@ async function attemptCustomerHandoff(
   senderId,
   userText,
   source,
-  platform = "messenger"
+  platform = "messenger",
+  welcomeState = null
 ) {
   if (!isWithinLiveSupportHours()) {
     console.log(
       `Customer handoff blocked for ${senderId} (${source}) — outside support hours (${SUPPORT_HOURS_START}:00–${SUPPORT_HOURS_END}:00 ${SUPPORT_TIMEZONE}).`
     );
-    await sendMessageWithFallback(senderId, AFTER_HOURS_HANDOFF_REPLY);
-    if (openai) {
-      appendChatHistory(senderId, userText, AFTER_HOURS_HANDOFF_REPLY);
-    }
+    await deliverCustomerReply(
+      senderId,
+      userText,
+      platform,
+      AFTER_HOURS_HANDOFF_REPLY,
+      welcomeState
+    );
     return false;
   }
-  await notifyAgentRequested(senderId, userText, source, platform);
+  await notifyAgentRequested(senderId, userText, source, platform, welcomeState);
   return true;
 }
 
@@ -3211,7 +3226,19 @@ async function processWebhookEvents(body) {
   }
 }
 
-async function handleStructuredFlows(senderId, userText, platform) {
+async function deliverCustomerReply(senderId, userText, platform, reply, welcomeState = null) {
+  let message = String(reply || "").trim();
+  if (!message) return;
+  if (welcomeState && !welcomeState.done) {
+    message = applyWelcomeToReply(message, senderId, welcomeState);
+  }
+  message = sanitizeBotReply(message);
+  if (!message) return;
+  await sendMessageWithFallback(senderId, message);
+  if (openai) appendChatHistory(senderId, userText, message);
+}
+
+async function handleStructuredFlows(senderId, userText, platform, welcomeState = null) {
   const profileName = await resolveCustomerDisplayName(senderId, platform);
   const phone = extractPhone(userText);
   const name = extractName(userText) || profileName || "";
@@ -3226,8 +3253,7 @@ async function handleStructuredFlows(senderId, userText, platform) {
     if (appt.appointment) {
       await notifyAppointmentByEmail(appt.appointment);
     }
-    await sendMessageWithFallback(senderId, sanitizeBotReply(appt.reply));
-    if (openai) appendChatHistory(senderId, userText, appt.reply);
+    await deliverCustomerReply(senderId, userText, platform, appt.reply, welcomeState);
     return true;
   }
 
@@ -3243,8 +3269,7 @@ async function handleStructuredFlows(senderId, userText, platform) {
       lastMessage: userText,
       trigger: "product recommender",
     });
-    await sendMessageWithFallback(senderId, sanitizeBotReply(rec.reply));
-    if (openai) appendChatHistory(senderId, userText, rec.reply);
+    await deliverCustomerReply(senderId, userText, platform, rec.reply, welcomeState);
     return true;
   }
 
@@ -3276,6 +3301,34 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
+  const profileName = await resolveCustomerDisplayName(senderId, platform);
+  const welcomeState = createWelcomeState(senderId, userText, messageContext.event, {
+    name: profileName,
+    isWeekend: isWeekend(),
+    agentAvailable: isWithinLiveSupportHours(),
+    platform,
+  });
+
+  if (welcomeState.isGetStarted) {
+    queueLeadCapture({
+      senderId,
+      platform,
+      name: profileName || "",
+      interest: "new chat",
+      stage: "browsing",
+      lastMessage: userText,
+      trigger: "get started",
+    });
+    await deliverCustomerReply(
+      senderId,
+      userText,
+      platform,
+      welcomeOnlyReply(senderId, welcomeState),
+      welcomeState
+    );
+    return;
+  }
+
   const lastAssistantReply = lastAssistantMessage(senderId);
 
   if (isQuoteCaptureConfigured()) {
@@ -3289,8 +3342,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     );
     if (quotePreEarly.handled) {
       clearDeliveryAgentOfferPending(senderId);
-      await sendMessageWithFallback(senderId, sanitizeBotReply(quotePreEarly.reply));
-      if (openai) appendChatHistory(senderId, userText, quotePreEarly.reply);
+      await deliverCustomerReply(senderId, userText, platform, quotePreEarly.reply, welcomeState);
       return;
     }
   }
@@ -3311,8 +3363,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     if (postQuoteFlow.notifyDelivery) {
       await notifyDeliveryByEmail(senderId, userText, "post-quote delivery details", platform);
     }
-    await sendMessageWithFallback(senderId, sanitizeBotReply(postQuoteFlow.reply));
-    if (openai) appendChatHistory(senderId, userText, postQuoteFlow.reply);
+    await deliverCustomerReply(senderId, userText, platform, postQuoteFlow.reply, welcomeState);
     return;
   }
 
@@ -3356,8 +3407,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     notifyPaymentProofByEmail(senderId, userText, platform).catch((err) => {
       console.warn("Payment proof email failed:", err.message);
     });
-    await sendMessageWithFallback(senderId, sanitizeBotReply(reply));
-    if (openai) appendChatHistory(senderId, userText, reply);
+    await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
     return;
   }
 
@@ -3373,7 +3423,13 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       deliveryTrigger: "outside cebu — live agent requested",
       isHandoff: true,
     });
-    await attemptCustomerHandoff(senderId, userText, "outside cebu agent offer", platform);
+    await attemptCustomerHandoff(
+      senderId,
+      userText,
+      "outside cebu agent offer",
+      platform,
+      welcomeState
+    );
     return;
   }
 
@@ -3395,8 +3451,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         platform
       );
     }
-    await sendMessageWithFallback(senderId, sanitizeBotReply(outsideCebu.reply));
-    if (openai) appendChatHistory(senderId, userText, outsideCebu.reply);
+    await deliverCustomerReply(senderId, userText, platform, outsideCebu.reply, welcomeState);
     return;
   }
 
@@ -3411,8 +3466,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       isDeliveryInquiry: true,
       deliveryTrigger: "weekend delivery inquiry",
     });
-    await sendMessageWithFallback(senderId, sanitizeBotReply(reply));
-    if (openai) appendChatHistory(senderId, userText, reply);
+    await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
     return;
   }
 
@@ -3430,8 +3484,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     const confirmMsg =
       "Noted — our team will follow up on your delivery. I can still help here with other questions.";
     await notifyDeliveryByEmail(senderId, userText, "delivery rep requested", platform);
-    await sendMessageWithFallback(senderId, confirmMsg);
-    if (openai) appendChatHistory(senderId, userText, confirmMsg);
+    await deliverCustomerReply(senderId, userText, platform, confirmMsg, welcomeState);
     return;
   }
 
@@ -3443,12 +3496,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       );
     } else {
       captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
-      await attemptCustomerHandoff(senderId, userText, "phrase match", platform);
+      await attemptCustomerHandoff(senderId, userText, "phrase match", platform, welcomeState);
       return;
     }
   }
 
-  if (await handleStructuredFlows(senderId, userText, platform)) {
+  if (await handleStructuredFlows(senderId, userText, platform, welcomeState)) {
     return;
   }
 
@@ -3587,7 +3640,15 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     } else {
       clearDeliveryAgentOfferPending(senderId);
       captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
-      if (!(await attemptCustomerHandoff(senderId, userText, "AI [[HANDOFF]] marker", platform))) {
+      if (
+        !(await attemptCustomerHandoff(
+          senderId,
+          userText,
+          "AI [[HANDOFF]] marker",
+          platform,
+          welcomeState
+        ))
+      ) {
         return;
       }
       return;
@@ -3671,12 +3732,8 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     assistantReply: reply,
   });
 
-  if (openai) {
-    appendChatHistory(senderId, userText, reply);
-  }
-
   try {
-    await sendMessageWithFallback(senderId, sanitizeBotReply(reply));
+    await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
   } catch (err) {
     console.error(`Send failed for ${senderId} (${platformLabel(platform)}):`, err.message);
     throw err;
