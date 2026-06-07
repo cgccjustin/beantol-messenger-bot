@@ -12,7 +12,9 @@ const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote, bu
 const {
   isWeekend,
   getWeekendSystemNote,
+  buildWeekendPickupReply,
   buildWeekendDeliveryReply,
+  isWeekendPickupContext,
   isWeekendDeliveryContext,
 } = require("./lib/shop-hours");
 const {
@@ -3457,17 +3459,22 @@ async function handleMessage(senderId, userText, platform = "messenger", message
 
   if (
     isWeekend() &&
-    isWeekendDeliveryContext(userText, {
-      looksLikeDeliveryDetails: looksLikeDeliveryDetailsSubmission(userText),
-    })
+    !isPostQuoteFlowActive(senderId)
   ) {
-    const reply = buildWeekendDeliveryReply(isWithinLiveSupportHours());
-    captureLeadFromMessage(senderId, userText, platform, {
-      isDeliveryInquiry: true,
-      deliveryTrigger: "weekend delivery inquiry",
-    });
-    await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
-    return;
+    const looksLikeDeliveryDetails = looksLikeDeliveryDetailsSubmission(userText);
+    const pickupIntent = isWeekendPickupContext(userText);
+    const deliveryIntent = isWeekendDeliveryContext(userText, { looksLikeDeliveryDetails });
+    if (pickupIntent || deliveryIntent) {
+      const reply = pickupIntent
+        ? buildWeekendPickupReply(isWithinLiveSupportHours())
+        : buildWeekendDeliveryReply(isWithinLiveSupportHours());
+      captureLeadFromMessage(senderId, userText, platform, {
+        isDeliveryInquiry: deliveryIntent,
+        deliveryTrigger: pickupIntent ? "weekend pickup inquiry" : "weekend delivery inquiry",
+      });
+      await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
+      return;
+    }
   }
 
   if (
