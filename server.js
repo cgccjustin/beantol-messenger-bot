@@ -87,6 +87,7 @@ const {
   listAppointments,
   updateAppointmentStatus,
   VALID_STATUSES: APPOINTMENT_STATUSES,
+  formatPreferredWhen,
 } = require("./lib/appointments");
 const {
   isQuoteCaptureConfigured,
@@ -1494,7 +1495,7 @@ async function notifyAppointmentByEmail(appointment) {
         "",
         `ID: ${appointment.appointmentId}`,
         `Type: ${appointment.type}`,
-        `Preferred: ${appointment.preferredDate} ${appointment.preferredTime}`,
+        `Preferred: ${formatPreferredWhen(appointment.preferredDate, appointment.preferredTime)}`,
         appointment.name ? `Name: ${appointment.name}` : null,
         appointment.phone ? `Phone: ${appointment.phone}` : null,
         `Sender ID: ${appointment.senderId}`,
