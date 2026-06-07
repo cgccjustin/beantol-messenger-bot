@@ -23,15 +23,26 @@ How to Order
 
 • Pickup: Visit the shop Monday–Friday, 9 AM–6 PM.
 • Messenger / Instagram: Message us here for pickup or delivery orders.
-• Delivery: Available via Maxim (see Delivery section below).
+• Delivery (Cebu area): Available via Maxim — see Delivery (Maxim) below.
+• Delivery outside Cebu: J&T or your preferred courier — see Delivery outside Cebu below.
 
 
-Delivery (Maxim)
+Delivery (Maxim — Cebu area only)
 
+• Maxim is for local delivery within the Cebu area only.
 • We arrange delivery through Maxim.
 • The Maxim delivery fee is paid by the customer to the rider — separate from the coffee order.
 • To arrange delivery, we need: (1) complete delivery address, (2) contact name, (3) mobile number.
 • Coffee payment must be settled first before we dispatch for delivery. Send proof of payment in this chat after paying (see Payment).
+
+
+Delivery outside Cebu (nationwide / other provinces)
+
+• We can ship to clients outside Cebu — Maxim does not apply outside the Cebu area.
+• Logistics: J&T Express, or a courier the customer prefers.
+• Delivery time and shipping cost depend on the destination — our team will confirm after reviewing your inquiry.
+• To get a quote and arrange shipping, leave: (1) full name, (2) mobile number, (3) complete address including city and province, (4) what you'd like to order (bean and size/kg).
+• A Beantol representative will follow up on outside-Cebu delivery inquiries. You may continue chatting here while you wait.
 
 
 Payment
@@ -236,7 +247,10 @@ Q: How can I order? / Pickup?
 A: Visit the shop Mon–Fri 9 AM–6 PM, or message us on Messenger or Instagram for pickup. For delivery we use Maxim (customer pays delivery fee). Closed weekends.
 
 Q: Do you deliver? / Maxim?
-A: Yes, via Maxim. Delivery fee is paid by the customer to the rider. We need delivery address, contact name, and mobile number. Coffee payment must be settled first — send proof of payment in chat.
+A: Yes, within the Cebu area via Maxim. Delivery fee is paid by the customer to the rider. We need delivery address, contact name, and mobile number. Coffee payment must be settled first — send proof of payment in chat.
+
+Q: Do you deliver outside Cebu? / To Manila / other provinces / nationwide?
+A: Yes. Maxim is Cebu-area only. Outside Cebu we ship via J&T or a courier you prefer. Delivery time and cost depend on your location — leave your name, mobile, full address (city/province), and order details; a Beantol representative will follow up. You can keep messaging here with questions while you wait.
 
 
 Pricing

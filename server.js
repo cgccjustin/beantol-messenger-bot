@@ -107,6 +107,13 @@ const {
   isPostQuoteFlowActive,
 } = require("./lib/post-quote-flow");
 const {
+  resolveOutsideCebuDeliveryTurn,
+  isOutsideCebuDeliveryInquiry,
+  isOutsideCebuAgentOfferPending,
+  clearOutsideCebuAgentOfferPending,
+  getOutsideCebuSystemNote,
+} = require("./lib/outside-cebu-delivery");
+const {
   escapeHtml,
   adminUrl,
   renderPage,
@@ -1008,6 +1015,7 @@ function isBotGeneratedOutboundText(text) {
   if (/^How would you like to proceed\?/i.test(t)) return true;
   if (/^Great — pickup at our shop:/i.test(t)) return true;
   if (/^Delivery via Maxim — please send all three/i.test(t)) return true;
+  if (/^Yes — we can ship outside Cebu\./i.test(t)) return true;
   if (/^Thank you for trusting Beantol!/i.test(t)) return true;
   if (/^Thank you for your payment\./i.test(t)) return true;
   if (/^Thank you — I'?ve noted your payment message\./i.test(t)) return true;
@@ -3354,6 +3362,45 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (
+    isOutsideCebuAgentOfferPending(senderId) &&
+    wantsAgentAfterDeliveryOffer(userText) &&
+    !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply) &&
+    !isPostQuotePickupConfirmTurn(senderId, userText)
+  ) {
+    clearOutsideCebuAgentOfferPending(senderId);
+    captureLeadFromMessage(senderId, userText, platform, {
+      isDeliveryInquiry: true,
+      deliveryTrigger: "outside cebu — live agent requested",
+      isHandoff: true,
+    });
+    await attemptCustomerHandoff(senderId, userText, "outside cebu agent offer", platform);
+    return;
+  }
+
+  const outsideCebu = resolveOutsideCebuDeliveryTurn(senderId, userText, {
+    agentAvailable: isWithinLiveSupportHours(),
+  });
+  if (outsideCebu.handled) {
+    captureLeadFromMessage(senderId, userText, platform, {
+      isDeliveryInquiry: true,
+      deliveryTrigger: outsideCebu.isRepeat
+        ? "outside cebu delivery — follow-up"
+        : "outside cebu delivery inquiry",
+    });
+    if (!outsideCebu.offerAgent) {
+      await notifyDeliveryByEmail(
+        senderId,
+        userText,
+        "outside cebu delivery inquiry",
+        platform
+      );
+    }
+    await sendMessageWithFallback(senderId, sanitizeBotReply(outsideCebu.reply));
+    if (openai) appendChatHistory(senderId, userText, outsideCebu.reply);
+    return;
+  }
+
+  if (
     isWeekend() &&
     isWeekendDeliveryContext(userText, {
       looksLikeDeliveryDetails: looksLikeDeliveryDetailsSubmission(userText),
@@ -3425,6 +3472,15 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         systemMessages.push({
           role: "system",
           content: getWeekendSystemNote(isWithinLiveSupportHours()),
+        });
+      }
+      if (
+        isOutsideCebuDeliveryInquiry(userText) ||
+        isOutsideCebuDeliveryInquiry(recentUserMessages(senderId, 4).join("\n"))
+      ) {
+        systemMessages.push({
+          role: "system",
+          content: getOutsideCebuSystemNote(),
         });
       }
       if (hasImageAttachment && paymentResolution.action === "none") {
