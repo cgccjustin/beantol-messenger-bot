@@ -102,6 +102,11 @@ const {
   isQuoteConfirmYesTurn,
 } = require("./lib/quote-confirm");
 const {
+  processPostQuoteFlowPreAi,
+  isPostQuotePickupConfirmTurn,
+  isPostQuoteFlowActive,
+} = require("./lib/post-quote-flow");
+const {
   escapeHtml,
   adminUrl,
   renderPage,
@@ -1000,6 +1005,10 @@ function isBotGeneratedOutboundText(text) {
   if (/Quote summary\s*—\s*please confirm:/i.test(t)) return true;
   if (/Reply YES to get your printable formal quote link/i.test(t)) return true;
   if (/^Here'?s your formal quote \(save or print\):/i.test(t)) return true;
+  if (/^How would you like to proceed\?/i.test(t)) return true;
+  if (/^Great — pickup at our shop:/i.test(t)) return true;
+  if (/^Delivery via Maxim — please send all three/i.test(t)) return true;
+  if (/^Thank you for trusting Beantol!/i.test(t)) return true;
   if (/^Thank you for your payment\./i.test(t)) return true;
   if (/^Thank you — I'?ve noted your payment message\./i.test(t)) return true;
   if (/^Good decision! At our \d+ kg minimum for wholesale/i.test(t)) return true;
@@ -1288,24 +1297,24 @@ function captureOrderFromMessage(senderId, userText, platform, options = {}) {
     isOrderIntent: options.isPaymentProofImage || isOrderIntent,
     isPaymentProofImage: Boolean(options.isPaymentProofImage),
   });
-  if (!signal) return;
+  if (!signal && !options.postQuoteCapture) return;
 
   queueOrderCapture({
     senderId,
     platform,
-    name: signal.name || options.name || "",
-    phone: signal.phone || options.phone || "",
-    bean: signal.bean || "",
-    size: signal.size || "",
-    fulfillment: signal.fulfillment || "",
-    address: signal.address || "",
-    paymentStatus: signal.paymentStatus || "unpaid",
-    orderStatus: signal.orderStatus || "inquiry",
+    name: signal?.name || options.name || "",
+    phone: options.phone || signal?.phone || "",
+    bean: signal?.bean || "",
+    size: signal?.size || "",
+    fulfillment: options.fulfillment || signal?.fulfillment || "",
+    address: options.address || signal?.address || "",
+    paymentStatus: signal?.paymentStatus || "unpaid",
+    orderStatus: options.orderStatus || signal?.orderStatus || "inquiry",
     lastMessage: userText,
     userText,
     historyTexts,
     assistantReply: options.assistantReply || "",
-    trigger: signal.trigger,
+    trigger: options.trigger || signal?.trigger || "order",
   });
 }
 
@@ -3278,13 +3287,34 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     }
   }
 
+  const postQuoteFlow = processPostQuoteFlowPreAi(senderId, userText, {
+    agentAvailable: isWithinLiveSupportHours(),
+    isWeekend: isWeekend(),
+  });
+  if (postQuoteFlow.handled) {
+    if (postQuoteFlow.captureOrder) {
+      captureOrderFromMessage(senderId, userText, platform, {
+        postQuoteCapture: true,
+        isOrderIntent: true,
+        ...postQuoteFlow.captureOrder,
+        trigger: "post-quote fulfillment",
+      });
+    }
+    if (postQuoteFlow.notifyDelivery) {
+      await notifyDeliveryByEmail(senderId, userText, "post-quote delivery details", platform);
+    }
+    await sendMessageWithFallback(senderId, sanitizeBotReply(postQuoteFlow.reply));
+    if (openai) appendChatHistory(senderId, userText, postQuoteFlow.reply);
+    return;
+  }
+
   updateReplyLanguagePreference(senderId, userText);
 
   const hasImageAttachment = messageHasImageAttachment(messageContext.event);
   const chatHistory = getChatHistory(senderId);
   const recentForContext = recentUserMessages(senderId, 6);
 
-  if (shouldSuppressAfterPaymentProof(senderId, userText)) {
+  if (shouldSuppressAfterPaymentProof(senderId, userText) && !isPostQuoteFlowActive(senderId)) {
     return;
   }
 
@@ -3342,7 +3372,8 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   if (
     isDeliveryAgentOfferPending(senderId) &&
     wantsAgentAfterDeliveryOffer(userText) &&
-    !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply)
+    !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply) &&
+    !isPostQuotePickupConfirmTurn(senderId, userText)
   ) {
     clearDeliveryAgentOfferPending(senderId);
     captureLeadFromMessage(senderId, userText, platform, {
