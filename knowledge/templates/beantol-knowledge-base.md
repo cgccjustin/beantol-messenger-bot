@@ -23,17 +23,26 @@ How to Order
 
 • Pickup: Visit the shop Monday–Friday, 9 AM–6 PM.
 • Messenger / Instagram: Message us here for pickup or delivery orders.
-• Delivery (Cebu area): Available via Maxim — see Delivery (Maxim) below.
+• Delivery (Cebu City / Mandaue / Talisay / Lapu-Lapu): Via Maxim — see Delivery (Maxim) below.
+• Delivery (other Cebu Province towns, e.g. Naga): Pickup, your own logistics, or J&T / preferred courier — see Delivery within Cebu Province below.
 • Delivery outside Cebu: J&T or your preferred courier — see Delivery outside Cebu below.
 
 
-Delivery (Maxim — Cebu area only)
+Delivery (Maxim — Cebu City, Mandaue, Talisay, Lapu-Lapu)
 
-• Maxim is for local delivery within the Cebu area only.
+• Maxim is for local delivery to Cebu City, Mandaue, Talisay, and Lapu-Lapu only.
 • We arrange delivery through Maxim.
 • The Maxim delivery fee is paid by the customer to the rider — separate from the coffee order.
 • To arrange delivery, we need: (1) complete delivery address, (2) contact name, (3) mobile number.
 • Coffee payment must be settled first before we dispatch for delivery. Send proof of payment in this chat after paying (see Payment).
+
+
+Delivery within Cebu Province (outside Maxim zones — e.g. Naga, Carcar)
+
+• For towns farther from our shop (impractical for Maxim), we can still serve you.
+• Options: (1) pickup at our shop (Banilad, Cebu City), (2) you arrange your own courier/logistics to pick up from us, or (3) we help ship via J&T or a courier you prefer.
+• Shipping / delivery fee is shouldered by the customer, separate from the coffee order.
+• Leave name, mobile, full address, and order details; our team will follow up to arrange the best option.
 
 
 Delivery outside Cebu (nationwide / other provinces)
@@ -244,10 +253,13 @@ A: Holy Family Village 2, Governor Cuenco Avenue, Banilad, Cebu City (beside the
 Ordering & delivery
 
 Q: How can I order? / Pickup?
-A: Visit the shop Mon–Fri 9 AM–6 PM, or message us on Messenger or Instagram for pickup. For delivery we use Maxim (customer pays delivery fee). Closed weekends.
+A: Visit the shop Mon–Fri 9 AM–6 PM, or message us on Messenger or Instagram for pickup. Maxim delivery for Cebu City, Mandaue, Talisay, Lapu-Lapu; other options for farther Cebu Province or outside Cebu. Closed weekends.
 
 Q: Do you deliver? / Maxim?
-A: Yes, within the Cebu area via Maxim. Delivery fee is paid by the customer to the rider. We need delivery address, contact name, and mobile number. Coffee payment must be settled first — send proof of payment in chat.
+A: Cebu City, Mandaue, Talisay, and Lapu-Lapu — via Maxim (customer pays rider fee). Other Cebu Province towns (e.g. Naga, Carcar) — pickup at shop, your own logistics, or J&T / courier you prefer (customer pays shipping). Outside Cebu — J&T or preferred courier. We need address, contact name, and mobile for delivery orders. Coffee payment first — send proof in chat.
+
+Q: Do you deliver to Naga / Carcar / far Cebu Province towns?
+A: Yes — pickup at our shop, you arrange your own courier, or we help via J&T or a courier you prefer. Maxim is for Cebu City, Mandaue, Talisay, and Lapu-Lapu only. Shipping fee is shouldered by you, separate from coffee.
 
 Q: Do you deliver outside Cebu? / To Manila / other provinces / nationwide?
 A: Yes. Maxim is Cebu-area only. Outside Cebu we ship via J&T or a courier you prefer. Delivery time and cost depend on your location — leave your name, mobile, full address (city/province), and order details; a Beantol representative will follow up. You can keep messaging here with questions while you wait.

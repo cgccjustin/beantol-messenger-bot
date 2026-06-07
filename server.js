@@ -115,6 +115,7 @@ const {
   clearOutsideCebuAgentOfferPending,
   getOutsideCebuSystemNote,
 } = require("./lib/outside-cebu-delivery");
+const { resolveCebuAreaDeliveryTurn, isCebuAreaDeliveryInquiry, getCebuDeliverySystemNote } = require("./lib/cebu-area-delivery");
 const {
   createWelcomeState,
   applyWelcomeToReply,
@@ -1023,6 +1024,10 @@ function isBotGeneratedOutboundText(text) {
   if (/^Great — pickup at our shop:/i.test(t)) return true;
   if (/^Delivery via Maxim — please send all three/i.test(t)) return true;
   if (/^Welcome to Beantol/i.test(t)) return true;
+  if (/^Yes — we can deliver to \w+/i.test(t)) return true;
+  if (/^Yes — we can arrange Maxim delivery/i.test(t)) return true;
+  if (/^Yes — we can get your order to/i.test(t)) return true;
+  if (/^Yes — we deliver within the Cebu area via Maxim/i.test(t)) return true;
   if (/^Yes — we can ship outside Cebu\./i.test(t)) return true;
   if (/^Thank you for trusting Beantol!/i.test(t)) return true;
   if (/^Thank you for your payment\./i.test(t)) return true;
@@ -3457,6 +3462,19 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
+  const cebuAreaDelivery = resolveCebuAreaDeliveryTurn(userText, {
+    isWeekend: isWeekend(),
+    agentAvailable: isWithinLiveSupportHours(),
+  });
+  if (cebuAreaDelivery.handled) {
+    captureLeadFromMessage(senderId, userText, platform, {
+      isDeliveryInquiry: true,
+      deliveryTrigger: "cebu area delivery inquiry",
+    });
+    await deliverCustomerReply(senderId, userText, platform, cebuAreaDelivery.reply, welcomeState);
+    return;
+  }
+
   if (
     isWeekend() &&
     !isPostQuoteFlowActive(senderId)
@@ -3541,6 +3559,15 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         systemMessages.push({
           role: "system",
           content: getOutsideCebuSystemNote(),
+        });
+      }
+      if (
+        isCebuAreaDeliveryInquiry(userText) ||
+        isCebuAreaDeliveryInquiry(recentUserMessages(senderId, 4).join("\n"))
+      ) {
+        systemMessages.push({
+          role: "system",
+          content: getCebuDeliverySystemNote(),
         });
       }
       if (hasImageAttachment && paymentResolution.action === "none") {
