@@ -107,7 +107,13 @@ const {
   processPostQuoteFlowPreAi,
   isPostQuotePickupConfirmTurn,
   isPostQuoteFlowActive,
+  resumePostQuoteFromRepliedMessage,
 } = require("./lib/post-quote-flow");
+const {
+  recordOutboundMessage,
+  resolveInboundReplyTo,
+  hasReplyTag,
+} = require("./lib/message-reply-context");
 const {
   resolveOutsideCebuDeliveryTurn,
   isOutsideCebuDeliveryInquiry,
@@ -3245,6 +3251,40 @@ async function deliverCustomerReply(senderId, userText, platform, reply, welcome
   if (openai) appendChatHistory(senderId, userText, message);
 }
 
+function applyInboundReplyToContext(senderId, userText, platform, messageContext = {}) {
+  const replyToContext = resolveInboundReplyTo(senderId, messageContext.event);
+  if (!replyToContext) {
+    return {
+      replyToContext: null,
+      lastAssistantReply: lastAssistantMessage(senderId),
+    };
+  }
+
+  console.log(
+    `Reply-to-bot for ${senderId}: mid=${replyToContext.mid} tags=${replyToContext.tags.join(",") || "none"}`
+  );
+
+  if (!isPostQuoteFlowActive(senderId)) {
+    const resumed = resumePostQuoteFromRepliedMessage(
+      senderId,
+      replyToContext.content,
+      platform
+    );
+    if (resumed.resumed) {
+      console.log(`Post-quote session resumed from reply-to (${resumed.step}).`);
+    }
+  }
+
+  if (hasReplyTag(replyToContext, "delivery_details_confirm")) {
+    markDeliveryAgentOfferPending(senderId);
+  }
+
+  return {
+    replyToContext,
+    lastAssistantReply: replyToContext.content,
+  };
+}
+
 async function handleStructuredFlows(senderId, userText, platform, welcomeState = null) {
   const profileName = await resolveCustomerDisplayName(senderId, platform);
   const phone = extractPhone(userText);
@@ -3336,7 +3376,44 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
-  const lastAssistantReply = lastAssistantMessage(senderId);
+  const { replyToContext, lastAssistantReply } = applyInboundReplyToContext(
+    senderId,
+    userText,
+    platform,
+    messageContext
+  );
+
+  if (
+    replyToContext &&
+    hasReplyTag(replyToContext, "agent_offer") &&
+    !hasReplyTag(replyToContext, "delivery_details_confirm") &&
+    (isConfirmYes(userText) || wantsAgentAfterDeliveryOffer(userText)) &&
+    !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply)
+  ) {
+    captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
+    await attemptCustomerHandoff(senderId, userText, "reply-to agent offer", platform, welcomeState);
+    return;
+  }
+
+  if (
+    replyToContext &&
+    hasReplyTag(replyToContext, "delivery_details_confirm") &&
+    (wantsAgentAfterDeliveryOffer(userText) ||
+      (isConfirmYes(userText) && String(userText).trim().length <= 24)) &&
+    !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply) &&
+    !isPostQuotePickupConfirmTurn(senderId, userText)
+  ) {
+    clearDeliveryAgentOfferPending(senderId);
+    captureLeadFromMessage(senderId, userText, platform, {
+      isDeliveryInquiry: true,
+      deliveryTrigger: "delivery rep requested (reply-to)",
+    });
+    const confirmMsg =
+      "Noted — our team will follow up on your delivery. I can still help here with other questions.";
+    await notifyDeliveryByEmail(senderId, userText, "delivery rep requested (reply-to)", platform);
+    await deliverCustomerReply(senderId, userText, platform, confirmMsg, welcomeState);
+    return;
+  }
 
   if (isQuoteCaptureConfigured()) {
     const quotePreEarly = await processQuoteConfirmPreAi(
@@ -3817,6 +3894,7 @@ async function sendMessage(recipientId, text, options = {}) {
   }
 
   rememberBotMessageId(data.message_id);
+  recordOutboundMessage(recipientId, data.message_id, text);
   console.log(`Reply sent to ${recipientId}`);
   return data;
 }
