@@ -97,6 +97,9 @@ const {
   processQuoteConfirmPreAi,
   processQuoteConfirmPostAi,
   getQuoteConfirmSession,
+  isConfirmYes,
+  assistantAlreadyAskedConfirm,
+  isQuoteConfirmYesTurn,
 } = require("./lib/quote-confirm");
 const {
   escapeHtml,
@@ -945,7 +948,7 @@ function isBotOwnEcho(event, text = "") {
   const appId = getMessageAppId(event);
   if (metaAppId && appId && appId === metaAppId) return true;
   if (msg.mid && botSentMessageIds.has(msg.mid)) return true;
-  if (text && isKnownBotOutboundText(text)) return true;
+  if (text && isBotGeneratedOutboundText(text)) return true;
   return false;
 }
 
@@ -989,10 +992,27 @@ function isKnownBotOutboundText(text) {
   return false;
 }
 
+/** Bot API / template replies that must not trigger admin takeover on message_echoes. */
+function isBotGeneratedOutboundText(text) {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (isKnownBotOutboundText(t)) return true;
+  if (/Quote summary\s*—\s*please confirm:/i.test(t)) return true;
+  if (/Reply YES to get your printable formal quote link/i.test(t)) return true;
+  if (/^Here'?s your formal quote \(save or print\):/i.test(t)) return true;
+  if (/^Thank you for your payment\./i.test(t)) return true;
+  if (/^Thank you — I'?ve noted your payment message\./i.test(t)) return true;
+  if (/^Good decision! At our \d+ kg minimum for wholesale/i.test(t)) return true;
+  if (/^Sorry — that item is not available for order right now\./i.test(t)) return true;
+  if (/^Sorry — I couldn't generate that quote just now\./i.test(t)) return true;
+  if (/^No problem — what would you like a quote for\?/i.test(t)) return true;
+  return false;
+}
+
 /** Pause bot when a human admin replies from Business Suite (no extra customer message). */
 function pauseBotForAdminTakeover(customerId, adminText, platform = "messenger") {
   if (adminText && isAdminResumeCommand(adminText)) return;
-  if (adminText && isKnownBotOutboundText(adminText)) {
+  if (adminText && isBotGeneratedOutboundText(adminText)) {
     console.log(
       `Page outbound ignored for ${customerId} — matches a known bot message (not admin takeover).`
     );
@@ -3239,13 +3259,32 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
+  const lastAssistantReply = lastAssistantMessage(senderId);
+
+  if (isQuoteCaptureConfigured()) {
+    const quotePreEarly = await processQuoteConfirmPreAi(
+      senderId,
+      userText,
+      platform,
+      PUBLIC_BASE_URL,
+      recentUserMessages(senderId, 4),
+      { lastAssistantReply }
+    );
+    if (quotePreEarly.handled) {
+      clearDeliveryAgentOfferPending(senderId);
+      await sendMessageWithFallback(senderId, sanitizeBotReply(quotePreEarly.reply));
+      if (openai) appendChatHistory(senderId, userText, quotePreEarly.reply);
+      return;
+    }
+  }
+
   updateReplyLanguagePreference(senderId, userText);
 
   const hasImageAttachment = messageHasImageAttachment(messageContext.event);
   const chatHistory = getChatHistory(senderId);
   const recentForContext = recentUserMessages(senderId, 6);
 
-  if (shouldSuppressAfterPaymentProof(senderId)) {
+  if (shouldSuppressAfterPaymentProof(senderId, userText)) {
     return;
   }
 
@@ -3300,7 +3339,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
-  if (isDeliveryAgentOfferPending(senderId) && wantsAgentAfterDeliveryOffer(userText)) {
+  if (
+    isDeliveryAgentOfferPending(senderId) &&
+    wantsAgentAfterDeliveryOffer(userText) &&
+    !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply)
+  ) {
     clearDeliveryAgentOfferPending(senderId);
     captureLeadFromMessage(senderId, userText, platform, {
       isDeliveryInquiry: true,
@@ -3328,20 +3371,6 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (await handleStructuredFlows(senderId, userText, platform)) {
-    return;
-  }
-
-  const quotePre = await processQuoteConfirmPreAi(
-    senderId,
-    userText,
-    platform,
-    PUBLIC_BASE_URL,
-    recentUserMessages(senderId, 4),
-    { lastAssistantReply: lastAssistantMessage(senderId) }
-  );
-  if (quotePre.handled) {
-    await sendMessageWithFallback(senderId, sanitizeBotReply(quotePre.reply));
-    if (openai) appendChatHistory(senderId, userText, quotePre.reply);
     return;
   }
 
@@ -3452,6 +3481,16 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         reply =
           "Noted — our team will follow up on your delivery. I can still help here with other questions.";
       }
+    } else if (
+      isConfirmYes(userText) &&
+      (getQuoteConfirmSession(senderId)?.step === "confirm" ||
+        assistantAlreadyAskedConfirm(lastAssistantReply))
+    ) {
+      reply = reply.replace(HANDOFF_MARKER, "").trim();
+      if (!reply) {
+        reply =
+          "Thanks for confirming — if you did not receive your formal quote link yet, please send YES again or tell me the bean and size.";
+      }
     } else if (getHandoffSession(senderId)?.mode === "agent_requested") {
       reply = reply.replace(HANDOFF_MARKER, "").trim();
       if (!reply) {
@@ -3525,6 +3564,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         recentTexts: recentQuoteTexts,
       });
       if (quotePost.handled && quotePost.appendConfirm) {
+        clearDeliveryAgentOfferPending(senderId);
         reply = `${reply}\n\n${quotePost.reply}`;
       }
     }
