@@ -113,6 +113,7 @@ const {
   recordOutboundMessage,
   resolveInboundReplyTo,
   hasReplyTag,
+  isAgentOfferAcceptanceTurn,
 } = require("./lib/message-reply-context");
 const {
   resolveOutsideCebuDeliveryTurn,
@@ -3384,14 +3385,17 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   );
 
   if (
-    replyToContext &&
-    hasReplyTag(replyToContext, "agent_offer") &&
-    !hasReplyTag(replyToContext, "delivery_details_confirm") &&
-    (isConfirmYes(userText) || wantsAgentAfterDeliveryOffer(userText)) &&
-    !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply)
+    isAgentOfferAcceptanceTurn(userText, lastAssistantReply, replyToContext) &&
+    getHandoffSession(senderId)?.mode !== "agent_requested"
   ) {
     captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
-    await attemptCustomerHandoff(senderId, userText, "reply-to agent offer", platform, welcomeState);
+    await attemptCustomerHandoff(
+      senderId,
+      userText,
+      replyToContext ? "reply-to agent offer" : "YES after agent offer",
+      platform,
+      welcomeState
+    );
     return;
   }
 
@@ -3735,7 +3739,8 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     } else if (
       isConfirmYes(userText) &&
       (getQuoteConfirmSession(senderId)?.step === "confirm" ||
-        assistantAlreadyAskedConfirm(lastAssistantReply))
+        assistantAlreadyAskedConfirm(lastAssistantReply)) &&
+      !isAgentOfferAcceptanceTurn(userText, lastAssistantReply, replyToContext)
     ) {
       reply = reply.replace(HANDOFF_MARKER, "").trim();
       if (!reply) {
