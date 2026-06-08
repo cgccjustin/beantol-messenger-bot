@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Messenger Bot for Your Shop — Beantol</title>
+  <style>
+    @page { size: A4; margin: 0; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", Calibri, Arial, sans-serif;
+      width: 210mm;
+      height: 297mm;
+      color: #1a1a1a;
+      overflow: hidden;
+    }
+    .flyer {
+      width: 210mm;
+      height: 297mm;
+      display: flex;
+      flex-direction: column;
+      background: #fff;
+    }
+    .header {
+      background: linear-gradient(135deg, #3d2314 0%, #6b3a1f 55%, #8B4513 100%);
+      color: #fff;
+      padding: 22px 28px 20px;
+    }
+    .header .eyebrow {
+      font-size: 9pt;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      opacity: 0.85;
+      margin-bottom: 6px;
+    }
+    .header h1 {
+      font-size: 26pt;
+      line-height: 1.1;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .header .tagline {
+      font-size: 12pt;
+      opacity: 0.95;
+      max-width: 95%;
+    }
+    .hero-strip {
+      background: #f7f3ef;
+      border-bottom: 3px solid #8B4513;
+      padding: 14px 28px;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      text-align: center;
+    }
+    .hero-strip .stat strong {
+      display: block;
+      font-size: 18pt;
+      color: #5c3317;
+      line-height: 1.1;
+    }
+    .hero-strip .stat span {
+      font-size: 8.5pt;
+      color: #555;
+      line-height: 1.25;
+    }
+    .body {
+      flex: 1;
+      padding: 16px 28px 12px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px 22px;
+    }
+    .section h2 {
+      font-size: 11pt;
+      color: #5c3317;
+      border-bottom: 2px solid #d4a574;
+      padding-bottom: 4px;
+      margin-bottom: 8px;
+    }
+    .section ul {
+      list-style: none;
+      font-size: 9pt;
+      line-height: 1.45;
+    }
+    .section ul li {
+      padding-left: 14px;
+      position: relative;
+      margin-bottom: 5px;
+    }
+    .section ul li::before {
+      content: "✓";
+      position: absolute;
+      left: 0;
+      color: #8B4513;
+      font-weight: bold;
+      font-size: 8pt;
+    }
+    .full-width { grid-column: 1 / -1; }
+    .how {
+      background: #faf8f6;
+      border: 1px solid #e8ddd4;
+      border-radius: 6px;
+      padding: 12px 14px;
+    }
+    .how ol {
+      font-size: 8.5pt;
+      line-height: 1.5;
+      padding-left: 18px;
+      margin: 0;
+    }
+    .how li { margin-bottom: 3px; }
+    .case {
+      background: #3d2314;
+      color: #fff;
+      border-radius: 6px;
+      padding: 12px 14px;
+    }
+    .case h2 { color: #f0dcc8; border-color: #8B4513; }
+    .case p { font-size: 9pt; line-height: 1.45; opacity: 0.95; }
+    .case .highlight { color: #f0dcc8; font-weight: 600; }
+    .footer {
+      background: #2a1810;
+      color: #e8ddd4;
+      padding: 12px 28px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+    }
+    .footer .cta strong {
+      display: block;
+      font-size: 11pt;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+    .footer .cta span { font-size: 8.5pt; opacity: 0.85; }
+    .footer .built {
+      text-align: right;
+      font-size: 8pt;
+      opacity: 0.75;
+      line-height: 1.4;
+    }
+    @media print {
+      body, .flyer { width: 210mm; height: 297mm; }
+    }
+  </style>
+</head>
+<body>
+  <div class="flyer">
+    <div class="header">
+      <div class="eyebrow">Built for Beantol Coffee · Reference for any shop</div>
+      <h1>Your Shop's AI Assistant<br>Inside Messenger &amp; Instagram</h1>
+      <p class="tagline">Answer customers 24/7, capture orders, and hand off to your team — without building an app.</p>
+    </div>
+
+    <div class="hero-strip">
+      <div class="stat"><strong>24/7</strong><span>AI replies anytime</span></div>
+      <div class="stat"><strong>9 AM–9 PM</strong><span>Live agent handoff</span></div>
+      <div class="stat"><strong>0 apps</strong><span>Customers stay in chat</span></div>
+    </div>
+
+    <div class="body">
+      <div class="section">
+        <h2>What it does for customers</h2>
+        <ul>
+          <li>Answers hours, prices, products &amp; FAQ instantly</li>
+          <li>Recommends the right product (guided picker)</li>
+          <li>Generates formal quotes with shareable links</li>
+          <li>Books shop visits &amp; captures delivery details</li>
+          <li>Explains payment (GCash, bank) &amp; delivery options</li>
+          <li>Connects to a real person when they ask</li>
+        </ul>
+      </div>
+
+      <div class="section">
+        <h2>What it does for your team</h2>
+        <ul>
+          <li>Email alerts when someone needs a human</li>
+          <li>Admin dashboard — leads, orders, quotes, inventory</li>
+          <li>Edit knowledge in Google Docs (no coder needed)</li>
+          <li>Toggle out-of-stock from a Google Sheet</li>
+          <li>Pause bot when you reply; resume with one tap</li>
+          <li>Works on Facebook Messenger &amp; Instagram DMs</li>
+        </ul>
+      </div>
+
+      <div class="section how full-width">
+        <h2>How it works (simple)</h2>
+        <ol>
+          <li><strong>Customer DMs your Page</strong> — same Messenger/Instagram they already use</li>
+          <li><strong>Bot searches your Google Doc</strong> for facts + applies your business rules</li>
+          <li><strong>OpenAI writes a friendly reply</strong> — grounded in your content, not guesses</li>
+          <li><strong>Important inquiries saved</strong> to Google Sheets; team emailed when needed</li>
+          <li><strong>You take over in Business Suite</strong> when the conversation needs a human touch</li>
+        </ol>
+      </div>
+
+      <div class="section case">
+        <h2>Real example: Beantol Coffee</h2>
+        <p>
+          A Cebu roastery serving <span class="highlight">30+ cafés</span> uses this bot to handle pricing, bean recommendations, Maxim delivery (Cebu metro), J&amp;T shipping (province/nationwide), wholesale MOQ rules, and appointment booking — while staff focus on high-value chats.
+        </p>
+      </div>
+
+      <div class="section">
+        <h2>Perfect for shops that…</h2>
+        <ul>
+          <li>Get the same questions every day in DMs</li>
+          <li>Sell products with sizes, variants, or delivery zones</li>
+          <li>Want leads captured, not lost in inbox scroll</li>
+          <li>Need after-hours coverage without extra staff</li>
+        </ul>
+      </div>
+
+      <div class="section">
+        <h2>What you need to build one</h2>
+        <ul>
+          <li>Facebook Page (+ optional Instagram)</li>
+          <li>Meta Developer app &amp; webhook</li>
+          <li>OpenAI API account</li>
+          <li>Cloud host (e.g. Render)</li>
+          <li>Google Doc + Sheets (team-friendly)</li>
+          <li>Custom dev for your products &amp; rules</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="cta">
+        <strong>Want this for your shop?</strong>
+        <span>Start with a Messenger bot — same architecture adapts to bakeries, boutiques, clinics, salons &amp; more.</span>
+      </div>
+      <div class="built">
+        Beantol Messenger AI Bot · 2026<br>
+        Full guide: docs/Beantol-Messenger-Bot-Overview.pdf
+      </div>
+    </div>
+  </div>
+</body>
+</html>

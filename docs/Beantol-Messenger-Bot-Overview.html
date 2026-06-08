@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Beantol Messenger AI Bot — Complete Overview</title>
+  <style>
+    @page { margin: 18mm 16mm; size: A4; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", Calibri, Arial, sans-serif;
+      font-size: 10.5pt;
+      line-height: 1.45;
+      color: #1a1a1a;
+      max-width: 210mm;
+      margin: 0 auto;
+      padding: 12mm 10mm;
+    }
+    h1 { font-size: 22pt; color: #3d2314; margin: 0 0 4px; border-bottom: 3px solid #8B4513; padding-bottom: 8px; }
+    h2 { font-size: 14pt; color: #5c3317; margin-top: 22px; page-break-after: avoid; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+    h3 { font-size: 11.5pt; color: #333; margin-top: 14px; page-break-after: avoid; }
+    .subtitle { font-size: 12pt; color: #666; margin-bottom: 18px; }
+    .meta { background: #f7f3ef; border-left: 4px solid #8B4513; padding: 10px 14px; margin: 16px 0; font-size: 10pt; }
+    table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 9.5pt; page-break-inside: avoid; }
+    th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { background: #3d2314; color: #fff; }
+    tr:nth-child(even) { background: #fafafa; }
+    pre, .diagram {
+      background: #f4f4f4;
+      border: 1px solid #ddd;
+      padding: 10px 12px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 8.5pt;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      page-break-inside: avoid;
+    }
+    ul, ol { margin: 8px 0; padding-left: 22px; }
+    li { margin-bottom: 4px; }
+    .cover { text-align: center; padding: 40px 0 30px; page-break-after: always; }
+    .cover h1 { border: none; font-size: 28pt; }
+    .cover p { color: #555; font-size: 12pt; }
+    .toc { page-break-after: always; }
+    .toc ol { line-height: 1.8; }
+    .footer-note { margin-top: 30px; padding-top: 12px; border-top: 1px solid #ccc; font-size: 9pt; color: #666; }
+    .page-break { page-break-before: always; }
+    @media print {
+      body { padding: 0; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="cover">
+  <h1>Beantol Messenger AI Bot</h1>
+  <p><strong>Complete Project Overview &amp; Feature Guide</strong></p>
+  <p>Prepared for Beantol Coffee Roasters · June 2026</p>
+  <p style="margin-top:40px;font-size:10pt;">Facebook Messenger + Instagram DMs · Node.js · OpenAI · Google Workspace · Render</p>
+</div>
+
+<div class="toc">
+  <h2>Table of Contents</h2>
+  <ol>
+    <li>Executive Summary</li>
+    <li>What Problem It Solves</li>
+    <li>Channels Supported</li>
+    <li>How It Works</li>
+    <li>Feature List</li>
+    <li>Source of Truth — Where to Change What</li>
+    <li>Technology Stack</li>
+    <li>Architecture</li>
+    <li>Knowledge Base (RAG)</li>
+    <li>Human Handoff Flow</li>
+    <li>Costs &amp; Infrastructure</li>
+    <li>What's Built vs Future</li>
+    <li>Maintenance Checklist</li>
+    <li>Pitch for Other Shops</li>
+    <li>Admin URLs &amp; Security</li>
+  </ol>
+</div>
+
+<h2>1. Executive Summary</h2>
+<p>The Beantol Messenger AI Bot is a <strong>24/7 AI sales and customer support assistant</strong> that lives inside your Facebook Page and Instagram inbox. It answers product questions, helps customers choose beans, generates quotes, books shop visits, captures leads and orders, and escalates to human staff when needed — all without making customers leave Messenger or Instagram.</p>
+<p>This document explains <strong>what the bot does</strong>, <strong>how it works</strong>, <strong>where to change things</strong>, and <strong>what was built</strong> — useful for internal review or for showing other shop owners what a similar system could do for their business.</p>
+
+<div class="meta">
+  <strong>Platform:</strong> Facebook Messenger + Instagram DMs<br>
+  <strong>Hosting:</strong> Render (beantol-bot.onrender.com)<br>
+  <strong>AI:</strong> OpenAI gpt-4o-mini with RAG knowledge search<br>
+  <strong>Data:</strong> Google Docs (knowledge) + Google Sheets (CRM)
+</div>
+
+<h2>2. What Problem It Solves</h2>
+<table>
+  <tr><th>Before</th><th>With the bot</th></tr>
+  <tr><td>Staff must reply manually to every DM</td><td>AI handles FAQs, pricing, recommendations instantly</td></tr>
+  <tr><td>Product knowledge scattered in chats</td><td>Central knowledge base (Google Doc) synced to AI</td></tr>
+  <tr><td>Orders and inquiries lost in messages</td><td>Leads, orders, quotes saved to Google Sheets</td></tr>
+  <tr><td>No after-hours coverage</td><td>AI replies anytime; live agents 9 AM–9 PM</td></tr>
+  <tr><td>Hard to track who needs follow-up</td><td>Admin dashboard + email alerts + sales pipeline</td></tr>
+</table>
+
+<h2>3. Channels Supported</h2>
+<table>
+  <tr><th>Channel</th><th>Status</th><th>Notes</th></tr>
+  <tr><td>Facebook Messenger</td><td>Live</td><td>Primary channel; webhook + Page token</td></tr>
+  <tr><td>Instagram DMs</td><td>Live</td><td>Same bot, same admin dashboard</td></tr>
+  <tr><td>WhatsApp</td><td>Not built</td><td>Possible future addition</td></tr>
+  <tr><td>Website chat widget</td><td>Not built</td><td>Possible future addition</td></tr>
+</table>
+
+<h2>4. How It Works</h2>
+<div class="diagram">Customer sends message (Messenger or Instagram)
+        │
+        ▼
+Meta Webhook → Beantol Bot Server (Render cloud)
+        │
+        ├── Check: Is admin already replying? → Pause bot
+        ├── Check: Structured flows (quote, delivery, appointment, etc.)
+        ├── Search Google Doc knowledge (RAG) for relevant facts
+        ├── Load: behavior rules, inventory, chat history
+        │
+        ▼
+OpenAI generates a friendly reply
+        │
+        ├── Send reply to customer
+        ├── Save lead/order/quote/appointment if applicable
+        └── Email team if handoff or delivery alert needed</div>
+
+<h3>Message processing order (simplified)</h3>
+<ol>
+  <li>Admin takeover — skip if staff is actively chatting</li>
+  <li>Get Started / first-time welcome</li>
+  <li>Reply-to context (swipe-reply YES on a specific bot message)</li>
+  <li>Agent handoff acceptance</li>
+  <li>Quote confirmation flow</li>
+  <li>Post-quote follow-up</li>
+  <li>Payment proof handling</li>
+  <li>Outside-Cebu delivery rules</li>
+  <li>Cebu area delivery (Maxim vs Naga vs province)</li>
+  <li>Weekend pickup vs delivery rules</li>
+  <li>Delivery rep YES acceptance</li>
+  <li>Phrase-based human handoff</li>
+  <li>Appointment booking wizard</li>
+  <li>Product recommendation wizard</li>
+  <li><strong>AI reply</strong> (RAG + rules + inventory + history)</li>
+  <li>Post-AI quote generation if pricing was discussed</li>
+</ol>
+<p>Critical business rules run <strong>before</strong> the AI, so the bot stays consistent even when the AI would otherwise improvise.</p>
+
+<h2 class="page-break">5. Feature List</h2>
+
+<h3>5.1 AI Customer Support</h3>
+<ul>
+  <li>Answers hours, location, products, pricing, payment, brewing, storage, contacts</li>
+  <li>Replies in English (even if customer writes Cebuano/Tagalog/Bislish)</li>
+  <li>Conversation memory for context across messages</li>
+  <li>RAG search of Google Doc — does not guess prices or products</li>
+</ul>
+
+<h3>5.2 AI Sales Assistant</h3>
+<ul>
+  <li>Consultative selling: brew method, taste, volume</li>
+  <li>Recommends 1–2 beans with explanations</li>
+  <li>Correct retail sizes and wholesale rules (6 kg MOQ for Prime, Santos, Cerrado only)</li>
+  <li>Respects out-of-stock inventory</li>
+  <li>Follow-up for stale quoted leads</li>
+</ul>
+
+<h3>5.3 Product Recommendations</h3>
+<p>Guided step-by-step picker: brew method → taste → 1–2 bean suggestions with prices.</p>
+
+<h3>5.4 Quotation System</h3>
+<ul>
+  <li>Formal quotes with ID (QT-…) and printable shareable page</li>
+  <li>Saved to Google Sheets Quotes tab</li>
+</ul>
+
+<h3>5.5 Delivery Workflows</h3>
+<table>
+  <tr><th>Zone</th><th>Method</th></tr>
+  <tr><td>Cebu City, Mandaue, Talisay, Lapu-Lapu</td><td>Maxim (customer pays rider fee); payment + proof required first</td></tr>
+  <tr><td>Remote Cebu Province (Naga, Carcar, etc.)</td><td>Pickup, own logistics, or J&T/courier</td></tr>
+  <tr><td>Outside Cebu / nationwide</td><td>J&T or preferred courier; team confirms cost/time</td></tr>
+</table>
+<p>Delivery alerts email the team. Delivery does <strong>not</strong> pause the bot.</p>
+
+<h3>5.6 Human Handoff</h3>
+<ul>
+  <li>Triggers on phrases like "talk to a human", "real person", "need agent"</li>
+  <li>Email alert + dashboard shows "Awaiting agent"</li>
+  <li>AI keeps answering until staff replies in Business Suite → bot pauses</li>
+  <li>Auto-resumes after 15 min admin idle, or manual Resume AI</li>
+  <li>Live agents: 9 AM–9 PM Philippine time daily</li>
+</ul>
+
+<h3>5.7 Appointment Booking</h3>
+<ul>
+  <li>Shop visit booking via chat</li>
+  <li>Natural dates: "today 5pm", "tomorrow", "this coming Thursday"</li>
+  <li>Saved to Google Sheets Appointments tab</li>
+</ul>
+
+<h3>5.8 Lead, Order &amp; Event Capture</h3>
+<table>
+  <tr><th>Data</th><th>Storage</th><th>Admin</th></tr>
+  <tr><td>Leads</td><td>Google Sheet</td><td>/admin/leads</td></tr>
+  <tr><td>Orders</td><td>Google Sheet</td><td>/admin/orders</td></tr>
+  <tr><td>Quotes</td><td>Google Sheet</td><td>/admin/quotes</td></tr>
+  <tr><td>Appointments</td><td>Google Sheet</td><td>/admin/appointments</td></tr>
+  <tr><td>Events</td><td>Google Sheet</td><td>Analytics</td></tr>
+</table>
+
+<h3>5.9 Live Inventory</h3>
+<p>Google Sheet Inventory tab (preferred) or UNAVAILABLE_PRODUCTS env. Toggle stock without redeploy.</p>
+
+<h3>5.10 Admin Dashboard</h3>
+<p>Tabs: Overview, Analytics, Sales, Leads, Appointments, Orders, Quotes, Inventory. Includes sync knowledge, test email, resume AI.</p>
+
+<h3>5.11 Other Features</h3>
+<ul>
+  <li>Email notifications (Resend) for handoff and delivery</li>
+  <li>Reply-to message support (swipe YES maps to specific bot message)</li>
+  <li>Smart welcome (Get Started + first message handling)</li>
+  <li>Weekend/shop hours logic (Mon–Fri shop; agents daily 9 AM–9 PM)</li>
+  <li>Payment proof flow (GCash / UnionBank)</li>
+</ul>
+
+<h2 class="page-break">6. Source of Truth — Where to Change What</h2>
+
+<h3>Business facts → Google Doc</h3>
+<p><strong>Edit:</strong> hours, prices, FAQ, products, payment, contacts, policies.</p>
+<p><strong>Workflow:</strong> Edit Google Doc → Save → Sync via /admin/sync-knowledge → No deploy needed.</p>
+<p><strong>Repo backup:</strong> knowledge/templates/beantol-knowledge-base.md (not auto-used in production).</p>
+
+<h3>Bot behavior → Code (git deploy)</h3>
+<table>
+  <tr><th>Change</th><th>File(s)</th></tr>
+  <tr><td>Handoff, tone, sales script</td><td>system-rules.js</td></tr>
+  <tr><td>Delivery zone logic</td><td>lib/cebu-area-delivery.js, lib/outside-cebu-delivery.js</td></tr>
+  <tr><td>Welcome messages</td><td>lib/welcome.js</td></tr>
+  <tr><td>Quotes</td><td>lib/quotes.js, lib/post-quote-flow.js</td></tr>
+  <tr><td>Appointments</td><td>lib/appointments.js</td></tr>
+  <tr><td>Recommendations</td><td>lib/recommendations.js</td></tr>
+  <tr><td>Main pipeline</td><td>server.js</td></tr>
+</table>
+
+<h3>Stock → Google Sheet Inventory or Render env</h3>
+<h3>Customer records → Google Sheets (not AI knowledge)</h3>
+
+<h3>Quick guide</h3>
+<table>
+  <tr><th>You want to…</th><th>Do this</th></tr>
+  <tr><td>Add FAQ / change price</td><td>Google Doc → sync</td></tr>
+  <tr><td>Fixed reply for delivery zone</td><td>Code → deploy</td></tr>
+  <tr><td>Mark bean out of stock</td><td>Inventory Sheet</td></tr>
+  <tr><td>Change appointment steps</td><td>Code → deploy</td></tr>
+</table>
+
+<h2>7. Technology Stack</h2>
+<table>
+  <tr><th>Layer</th><th>Technology</th></tr>
+  <tr><td>Runtime</td><td>Node.js 18+</td></tr>
+  <tr><td>Web server</td><td>Express</td></tr>
+  <tr><td>AI</td><td>OpenAI API (gpt-4o-mini)</td></tr>
+  <tr><td>Embeddings</td><td>text-embedding-3-small (RAG)</td></tr>
+  <tr><td>Messaging</td><td>Meta Graph API</td></tr>
+  <tr><td>Knowledge</td><td>Google Drive API (Docs export)</td></tr>
+  <tr><td>CRM data</td><td>Google Sheets</td></tr>
+  <tr><td>Email</td><td>Resend (production)</td></tr>
+  <tr><td>Hosting</td><td>Render</td></tr>
+</table>
+
+<h2>8. Architecture</h2>
+<div class="diagram">┌──────────────────────────────────────────────────────────┐
+│  CUSTOMER — Facebook Messenger / Instagram DM            │
+└────────────────────────────┬─────────────────────────────┘
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  META WEBHOOK (/webhook)                                 │
+└────────────────────────────┬─────────────────────────────┘
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│  BEANTOL BOT (Render)                                    │
+│  Flow engine │ RAG search │ OpenAI + rules + inventory   │
+│  Admin UI    │ Email      │ Google Sheets API            │
+└──────────────┬─────────────┬─────────────┬───────────────┘
+               ▼             ▼             ▼
+          Google Doc    Google Sheets   OpenAI API</div>
+
+<h2>9. Knowledge Base (RAG)</h2>
+<ol>
+  <li>Google Doc indexed into searchable chunks (embeddings)</li>
+  <li>Each message finds the 6 most relevant chunks</li>
+  <li>Chunks + behavior rules sent to OpenAI</li>
+  <li>AI writes a natural reply grounded in your content</li>
+</ol>
+<p>Team edits Google Doc without code changes. Sync after edits.</p>
+
+<h2>10. Human Handoff Flow</h2>
+<div class="diagram">Customer asks for human → handoff message + email
+→ AI still answers follow-ups
+→ Staff replies in Business Suite → bot PAUSES
+→ After idle or Resume AI → "assistant is back" message</div>
+
+<h2 class="page-break">11. Costs &amp; Infrastructure (Approximate)</h2>
+<table>
+  <tr><th>Service</th><th>Notes</th></tr>
+  <tr><td>Render</td><td>Free tier or ~$7+/mo always-on</td></tr>
+  <tr><td>OpenAI</td><td>Per-message; gpt-4o-mini is low cost</td></tr>
+  <tr><td>Resend</td><td>Free tier for low email volume</td></tr>
+  <tr><td>Google Cloud</td><td>Docs + Sheets API free tier usually enough</td></tr>
+  <tr><td>Meta</td><td>No per-message fee</td></tr>
+</table>
+
+<h2>12. What's Built vs Future</h2>
+<h3>Done</h3>
+<p>AI + RAG, Messenger + Instagram, handoff, delivery zones, quotes/orders/leads/appointments, live inventory, admin dashboard, analytics, recommendations wizard, reply-to context, conversation memory.</p>
+<h3>Not started</h3>
+<p>WhatsApp, website widget, full CRM, business intelligence, visual workflow builder.</p>
+
+<h2>13. Maintenance Checklist</h2>
+<ul>
+  <li><strong>Weekly:</strong> Check handoffs, stale leads, inventory</li>
+  <li><strong>Business info changes:</strong> Google Doc → sync → test</li>
+  <li><strong>Behavior changes:</strong> Code → deploy → test flow</li>
+</ul>
+
+<h2>14. Pitch for Other Shops</h2>
+<p>Any product-based business with repeated DMs (retail, F&B, roastery, boutique) benefits from:</p>
+<ul>
+  <li>24/7 professional first response</li>
+  <li>Consistent pricing and policy answers</li>
+  <li>Structured order/inquiry capture</li>
+  <li>Human takeover when it matters</li>
+  <li>Team-editable knowledge (Google Doc)</li>
+  <li>Admin dashboard without building a full app</li>
+</ul>
+<p><strong>To build one:</strong> Meta Developer app, OpenAI account, cloud host, Google Workspace (optional), custom development for products and rules.</p>
+
+<h2>15. Admin URLs &amp; Security</h2>
+<table>
+  <tr><th>Purpose</th><th>URL pattern</th></tr>
+  <tr><td>Admin dashboard</td><td>/admin?token=ADMIN_SECRET</td></tr>
+  <tr><td>Sync knowledge</td><td>/admin/sync-knowledge?token=ADMIN_SECRET</td></tr>
+  <tr><td>Knowledge status</td><td>/admin/knowledge-status?token=ADMIN_SECRET</td></tr>
+  <tr><td>Test email</td><td>/admin/test-email?token=ADMIN_SECRET</td></tr>
+</table>
+<p><strong>Security:</strong> Never commit .env; keep ADMIN_SECRET private; rotate tokens if exposed.</p>
+
+<div class="footer-note">
+  Document generated from the Beantol Messenger Bot codebase · June 2026<br>
+  Beantol Coffee Roasters · Cebu City · beantol-bot.onrender.com<br>
+  Also available as: docs/Beantol-Messenger-Bot-Overview.md
+</div>
+
+</body>
+</html>
