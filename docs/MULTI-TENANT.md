@@ -68,7 +68,9 @@ Handoff resolve with multiple tenants: add `?tenant=beantol` when needed.
 
 ## Plug-and-play checklist for a new café client
 
-1. Copy `config/tenants.example.json` → add new tenant (set `enabled: true`)  
+See **`docs/KAPE-KRISTIANO-SETUP.md`** for a full step-by-step (Beantol stays live on Render until you set `TENANTS_JSON`).
+
+1. Copy `config/tenants.example.json` → add new tenant (set `enabled: true` only when ready)  
 2. Write their FAQ/prices in a new Google Doc  
 3. Create a Google Sheet (Leads, Orders, etc.)  
 4. Get their Page ID + generate Page access token in Meta  

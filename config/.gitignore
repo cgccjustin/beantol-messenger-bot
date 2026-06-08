@@ -2,3 +2,4 @@
 # Never commit this file.
 
 tenants.json
+tenants.render.json

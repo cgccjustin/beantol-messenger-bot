@@ -1,19 +1,20 @@
 {
-  "_comment": "Copy to tenants.json (gitignored) or set TENANTS_JSON on Render. Do NOT commit real tokens.",
+  "_comment": "Copy to config/tenants.json (gitignored) or set TENANTS_JSON on Render. Do NOT commit real tokens. See docs/KAPE-KRISTIANO-SETUP.md",
   "tenants": [
     {
       "id": "beantol",
       "name": "Beantol Coffee Roasters",
       "enabled": true,
+      "legacy": true,
       "meta": {
-        "pageId": "YOUR_FACEBOOK_PAGE_NUMERIC_ID",
-        "pageAccessToken": "YOUR_PAGE_ACCESS_TOKEN",
+        "pageId": "YOUR_BEANTOL_FACEBOOK_PAGE_NUMERIC_ID",
+        "pageAccessToken": "YOUR_BEANTOL_PAGE_ACCESS_TOKEN",
         "instagramAccountId": "",
         "instagramUsername": "beantol"
       },
       "google": {
-        "knowledgeDocIds": "YOUR_DOC_ID:beantol-knowledge",
-        "leadsSheetId": "YOUR_GOOGLE_SHEET_ID",
+        "knowledgeDocIds": "YOUR_BEANTOL_DOC_ID:beantol-knowledge",
+        "leadsSheetId": "YOUR_BEANTOL_SHEET_ID",
         "leadsSheetTab": "Leads",
         "ordersSheetTab": "Orders",
         "quotesSheetTab": "Quotes",
@@ -22,14 +23,19 @@
         "eventsSheetTab": "Events"
       },
       "notify": {
-        "handoffEmail": "alerts@example.com",
-        "leadEmail": "alerts@example.com",
-        "orderEmail": "alerts@example.com"
+        "handoffEmail": "your-alerts@example.com",
+        "leadEmail": "your-alerts@example.com",
+        "orderEmail": "your-alerts@example.com"
+      },
+      "shop": {
+        "address": "Holy Family Village 2, Governor Cuenco Avenue, Banilad, Cebu City (beside the guardhouse).",
+        "hours": "Monday–Friday, 9:00 AM–6:00 PM (shop closed on weekends)."
       },
       "branding": {
         "businessName": "Beantol Coffee Roasters",
         "handoffReply": "",
-        "botResumeReply": ""
+        "botResumeReply": "",
+        "handoffCatchUpApology": ""
       },
       "features": {
         "appointments": true,
@@ -41,28 +47,45 @@
       }
     },
     {
-      "id": "cafe-example",
-      "name": "Example Café Client",
+      "id": "kape-kristiano",
+      "name": "Kape Kristiano",
       "enabled": false,
+      "_comment_enabled": "Set enabled: true only after Page token, Google Doc/Sheet, and Meta webhook are ready.",
       "meta": {
-        "pageId": "",
-        "pageAccessToken": "",
-        "instagramAccountId": ""
+        "pageId": "YOUR_KAPE_KRISTIANO_PAGE_NUMERIC_ID",
+        "pageAccessToken": "YOUR_KAPE_KRISTIANO_PAGE_ACCESS_TOKEN",
+        "instagramAccountId": "",
+        "instagramUsername": ""
       },
       "google": {
-        "knowledgeDocIds": "",
-        "leadsSheetId": ""
+        "knowledgeDocIds": "YOUR_KK_DOC_ID:kape-kristiano-knowledge",
+        "leadsSheetId": "YOUR_KK_SHEET_ID",
+        "leadsSheetTab": "Leads",
+        "ordersSheetTab": "Orders",
+        "quotesSheetTab": "Quotes",
+        "appointmentsSheetTab": "Appointments",
+        "inventorySheetTab": "Inventory",
+        "eventsSheetTab": "Events"
       },
       "notify": {
-        "handoffEmail": ""
+        "handoffEmail": "your-alerts@example.com",
+        "leadEmail": "your-alerts@example.com",
+        "orderEmail": "your-alerts@example.com"
+      },
+      "shop": {
+        "address": "YOUR_KK_SHOP_ADDRESS",
+        "hours": "YOUR_KK_SHOP_HOURS e.g. Monday–Saturday, 8:00 AM–8:00 PM"
       },
       "branding": {
-        "businessName": "Example Café"
+        "businessName": "Kape Kristiano",
+        "handoffReply": "",
+        "botResumeReply": "",
+        "handoffCatchUpApology": ""
       },
       "features": {
         "appointments": false,
-        "quotes": true,
-        "recommendations": true,
+        "quotes": false,
+        "recommendations": false,
         "cebuDeliveryZones": false,
         "leadCapture": true,
         "orderCapture": true

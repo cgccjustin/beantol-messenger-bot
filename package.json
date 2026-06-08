@@ -8,7 +8,9 @@
     "dev": "node server.js",
     "index-knowledge": "node scripts/index-knowledge.js",
     "sync-google-docs": "node scripts/sync-google-docs.js",
-    "sync-knowledge": "node scripts/sync-google-docs.js && node scripts/index-knowledge.js"
+    "sync-knowledge": "node scripts/sync-google-docs.js && node scripts/index-knowledge.js",
+    "validate-tenants": "node scripts/validate-tenants.js",
+    "bootstrap-tenants": "node scripts/bootstrap-tenants-from-env.js"
   },
   "engines": {
     "node": ">=18.0.0"

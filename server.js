@@ -45,6 +45,20 @@ const {
 } = require("./lib/tenant-registry");
 const { runWithTenant, getActiveTenant, scopeKey, parseScopedKey } = require("./lib/tenant-context");
 const {
+  getHandoffReply,
+  getBotResumeReply,
+  getHandoffCatchUpApology,
+  getNotifyEmail,
+  businessName,
+} = require("./lib/tenant-messages");
+const {
+  isCebuDeliveryZonesEnabled,
+  isRecommendationsEnabled,
+  isTenantFeatureEnabled,
+  buildTenantBehaviorSystemNote,
+} = require("./lib/tenant-features");
+const { isAppointmentCaptureEnabledForTenant } = require("./lib/tenant-google");
+const {
   analyzeLeadSignal,
   analyzeOrderSignal,
   extractName,
@@ -187,6 +201,7 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
 
 const HANDOFF_REPLY =
+  process.env.HANDOFF_REPLY ||
   "Got it — I am connecting you with our team. A Beantol team member will reply to you personally here in this chat as soon as they can. Please stay on this thread.";
 
 const BOT_RESUME_REPLY =
@@ -914,10 +929,6 @@ function getMissedClientMessageDuringTakeover(session) {
   return pending;
 }
 
-const HANDOFF_CATCHUP_APOLOGY =
-  process.env.HANDOFF_CATCHUP_APOLOGY ||
-  "Sorry — it looks like your last message may have been missed while our team was assisting you. Here's my best answer:";
-
 function replyLooksUncertainForCatchUp(reply) {
   const t = String(reply || "").trim();
   if (!t || t.length < 24) return true;
@@ -943,7 +954,7 @@ function applyHandoffCatchUpToReply(senderId, userText, reply) {
   if (!catchUp) return reply;
 
   handoffCatchUpContext.delete(scopeKey(senderId));
-  let message = `${HANDOFF_CATCHUP_APOLOGY}\n\n${String(reply || "").trim()}`.trim();
+  let message = `${getHandoffCatchUpApology()}\n\n${String(reply || "").trim()}`.trim();
   if (replyLooksUncertainForCatchUp(reply) && !isAiHandoffReply(reply)) {
     message += buildHumanOfferAfterCatchUp(isWithinLiveSupportHours());
   }
@@ -1195,7 +1206,7 @@ async function resumeBotForCustomer(customerId, adminText) {
   }
 
   try {
-    await sendMessageWithFallback(customerId, BOT_RESUME_REPLY);
+    await sendMessageWithFallback(customerId, getBotResumeReply());
     console.log(`Resume confirmation sent to ${customerId}.`);
   } catch (err) {
     console.error(`Resume confirmation failed for ${customerId}:`, err.message);
@@ -1658,7 +1669,7 @@ async function notifyAgentRequested(
   console.log(
     `Human agent requested for ${senderId} (${source}, ${platformLabel(platform)}). AI still replies until an admin messages from Business Suite.`
   );
-  await deliverCustomerReply(senderId, userText, platform, HANDOFF_REPLY, welcomeState);
+  await deliverCustomerReply(senderId, userText, platform, getHandoffReply(), welcomeState);
   notifyHandoffByEmail(senderId, userText, platform).catch((err) => {
     console.error("Handoff email failed:", err.message);
   });
@@ -1714,17 +1725,22 @@ async function notifyHandoffByEmail(senderId, userText, platform = "messenger") 
 
   const channel = platformLabel(platform);
   const handedOffAt = new Date().toISOString();
-  const resumeUrl = buildResumeUrl(senderId, null, true);
+  const tenant = getActiveTenant();
+  const tenantId = tenant?.id || "";
+  const brand = businessName(tenant);
+  const resumeUrl = buildResumeUrl(senderId, null, true, tenantId || null);
   const adminPanelUrl =
     PUBLIC_BASE_URL && ADMIN_SECRET
       ? `${PUBLIC_BASE_URL}/admin?token=${encodeURIComponent(ADMIN_SECRET)}`
       : "";
 
   const result = await sendAlertEmail({
-    subject: `Beantol — customer wants a human (${channel})`,
+    subject: `${brand} — customer wants a human (${channel})`,
+    to: getNotifyEmail("handoff", tenant) || HANDOFF_NOTIFY_EMAIL,
     text: [
       `A customer asked to speak with a real person on ${channel}.`,
       "",
+      `Shop: ${brand}${tenantId ? ` (${tenantId})` : ""}`,
       `Time: ${handedOffAt}`,
       `Channel: ${channel}`,
       `Sender ID: ${senderId}`,
@@ -1742,7 +1758,7 @@ async function notifyHandoffByEmail(senderId, userText, platform = "messenger") 
   });
 
   console.log(
-    `Handoff email sent to ${HANDOFF_NOTIFY_EMAIL} via ${result.provider}`
+    `Handoff email sent to ${getNotifyEmail("handoff", tenant) || HANDOFF_NOTIFY_EMAIL} via ${result.provider}`
   );
 }
 
@@ -1830,11 +1846,12 @@ function getPublicBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
-function buildResumeUrl(senderId, req, sendResume = true) {
+function buildResumeUrl(senderId, req, sendResume = true, tenantId = null) {
   const base = getPublicBaseUrl(req);
   if (!base || !ADMIN_SECRET) return "";
   const params = new URLSearchParams({ token: ADMIN_SECRET });
   if (sendResume) params.set("sendResume", "1");
+  if (tenantId) params.set("tenant", tenantId);
   return `${base}/admin/handoffs/${encodeURIComponent(senderId)}/resolve?${params}`;
 }
 
@@ -1879,9 +1896,10 @@ function renderHandoffsTableHtml(handoffs, req) {
   if (!handoffs.length) return "";
   const rows = handoffs
     .map((h) => {
-      const resumeUrl = buildResumeUrl(h.senderId, req, true);
+      const resumeUrl = buildResumeUrl(h.senderId, req, true, h.tenantId);
       const channel = h.platform === "instagram" ? "Instagram" : "Messenger";
       return `<tr>
+        <td>${escapeHtml(h.tenantId || "—")}</td>
         <td>${escapeHtml(channel)}</td>
         <td><code>${escapeHtml(h.senderId)}</code></td>
         <td>${escapeHtml(handoffStatusLabel(h))}</td>
@@ -1890,7 +1908,7 @@ function renderHandoffsTableHtml(handoffs, req) {
       </tr>`;
     })
     .join("");
-  return `<table><tr><th>Channel</th><th>Customer ID</th><th>Status</th><th>Last note</th><th></th></tr>${rows}</table>`;
+  return `<table><tr><th>Tenant</th><th>Channel</th><th>Customer ID</th><th>Status</th><th>Last note</th><th></th></tr>${rows}</table>`;
 }
 
 function renderHandoffsByPlatformHtml(handoffs, req) {
@@ -3499,34 +3517,38 @@ async function handleStructuredFlows(senderId, userText, platform, welcomeState 
   const phone = extractPhone(userText);
   const name = extractName(userText) || profileName || "";
 
-  const appt = await processAppointmentFlow(senderId, userText, {
-    platform,
-    name,
-    phone,
-  });
-  if (appt.handled) {
-    captureLeadFromMessage(senderId, userText, platform);
-    if (appt.appointment) {
-      await notifyAppointmentByEmail(appt.appointment);
-    }
-    await deliverCustomerReply(senderId, userText, platform, appt.reply, welcomeState);
-    return true;
-  }
-
-  const rec = processRecommendationFlow(senderId, userText);
-  if (rec.handled) {
-    queueLeadCapture({
-      senderId,
+  if (isAppointmentCaptureEnabledForTenant()) {
+    const appt = await processAppointmentFlow(senderId, userText, {
       platform,
       name,
       phone,
-      interest: rec.interest || "bean recommendation",
-      stage: "browsing",
-      lastMessage: userText,
-      trigger: "product recommender",
     });
-    await deliverCustomerReply(senderId, userText, platform, rec.reply, welcomeState);
-    return true;
+    if (appt.handled) {
+      captureLeadFromMessage(senderId, userText, platform);
+      if (appt.appointment) {
+        await notifyAppointmentByEmail(appt.appointment);
+      }
+      await deliverCustomerReply(senderId, userText, platform, appt.reply, welcomeState);
+      return true;
+    }
+  }
+
+  if (isRecommendationsEnabled()) {
+    const rec = processRecommendationFlow(senderId, userText);
+    if (rec.handled) {
+      queueLeadCapture({
+        senderId,
+        platform,
+        name,
+        phone,
+        interest: rec.interest || "bean recommendation",
+        stage: "browsing",
+        lastMessage: userText,
+        trigger: "product recommender",
+      });
+      await deliverCustomerReply(senderId, userText, platform, rec.reply, welcomeState);
+      return true;
+    }
   }
 
   return false;
@@ -3559,8 +3581,14 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   const profileName = await resolveCustomerDisplayName(senderId, platform);
+  const tenant = getActiveTenant();
   const welcomeState = createWelcomeState(senderId, userText, messageContext.event, {
     name: profileName,
+    businessName: businessName(tenant),
+    recommendations: tenant?.features?.recommendations,
+    quotes: tenant?.features?.quotes,
+    cebuDeliveryZones: tenant?.features?.cebuDeliveryZones,
+    appointments: tenant?.features?.appointments,
     isWeekend: isWeekend(),
     agentAvailable: isWithinLiveSupportHours(),
     platform,
@@ -3724,66 +3752,69 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
-  if (
-    isOutsideCebuAgentOfferPending(senderId) &&
-    wantsAgentAfterDeliveryOffer(userText) &&
-    !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply) &&
-    !isPostQuotePickupConfirmTurn(senderId, userText)
-  ) {
-    clearOutsideCebuAgentOfferPending(senderId);
-    captureLeadFromMessage(senderId, userText, platform, {
-      isDeliveryInquiry: true,
-      deliveryTrigger: "outside cebu — live agent requested",
-      isHandoff: true,
-    });
-    await attemptCustomerHandoff(
-      senderId,
-      userText,
-      "outside cebu agent offer",
-      platform,
-      welcomeState
-    );
-    return;
-  }
-
-  const outsideCebu = resolveOutsideCebuDeliveryTurn(senderId, userText, {
-    agentAvailable: isWithinLiveSupportHours(),
-  });
-  if (outsideCebu.handled) {
-    captureLeadFromMessage(senderId, userText, platform, {
-      isDeliveryInquiry: true,
-      deliveryTrigger: outsideCebu.isRepeat
-        ? "outside cebu delivery — follow-up"
-        : "outside cebu delivery inquiry",
-    });
-    if (!outsideCebu.offerAgent) {
-      await notifyDeliveryByEmail(
+  if (isCebuDeliveryZonesEnabled()) {
+    if (
+      isOutsideCebuAgentOfferPending(senderId) &&
+      wantsAgentAfterDeliveryOffer(userText) &&
+      !isQuoteConfirmYesTurn(userText, senderId, lastAssistantReply) &&
+      !isPostQuotePickupConfirmTurn(senderId, userText)
+    ) {
+      clearOutsideCebuAgentOfferPending(senderId);
+      captureLeadFromMessage(senderId, userText, platform, {
+        isDeliveryInquiry: true,
+        deliveryTrigger: "outside cebu — live agent requested",
+        isHandoff: true,
+      });
+      await attemptCustomerHandoff(
         senderId,
         userText,
-        "outside cebu delivery inquiry",
-        platform
+        "outside cebu agent offer",
+        platform,
+        welcomeState
       );
+      return;
     }
-    await deliverCustomerReply(senderId, userText, platform, outsideCebu.reply, welcomeState);
-    return;
-  }
 
-  const cebuAreaDelivery = resolveCebuAreaDeliveryTurn(userText, {
-    isWeekend: isWeekend(),
-    agentAvailable: isWithinLiveSupportHours(),
-  });
-  if (cebuAreaDelivery.handled) {
-    captureLeadFromMessage(senderId, userText, platform, {
-      isDeliveryInquiry: true,
-      deliveryTrigger: "cebu area delivery inquiry",
+    const outsideCebu = resolveOutsideCebuDeliveryTurn(senderId, userText, {
+      agentAvailable: isWithinLiveSupportHours(),
     });
-    await deliverCustomerReply(senderId, userText, platform, cebuAreaDelivery.reply, welcomeState);
-    return;
+    if (outsideCebu.handled) {
+      captureLeadFromMessage(senderId, userText, platform, {
+        isDeliveryInquiry: true,
+        deliveryTrigger: outsideCebu.isRepeat
+          ? "outside cebu delivery — follow-up"
+          : "outside cebu delivery inquiry",
+      });
+      if (!outsideCebu.offerAgent) {
+        await notifyDeliveryByEmail(
+          senderId,
+          userText,
+          "outside cebu delivery inquiry",
+          platform
+        );
+      }
+      await deliverCustomerReply(senderId, userText, platform, outsideCebu.reply, welcomeState);
+      return;
+    }
+
+    const cebuAreaDelivery = resolveCebuAreaDeliveryTurn(userText, {
+      isWeekend: isWeekend(),
+      agentAvailable: isWithinLiveSupportHours(),
+    });
+    if (cebuAreaDelivery.handled) {
+      captureLeadFromMessage(senderId, userText, platform, {
+        isDeliveryInquiry: true,
+        deliveryTrigger: "cebu area delivery inquiry",
+      });
+      await deliverCustomerReply(senderId, userText, platform, cebuAreaDelivery.reply, welcomeState);
+      return;
+    }
   }
 
   if (
     isWeekend() &&
-    !isPostQuoteFlowActive(senderId)
+    !isPostQuoteFlowActive(senderId) &&
+    isCebuDeliveryZonesEnabled()
   ) {
     const looksLikeDeliveryDetails = looksLikeDeliveryDetailsSubmission(userText);
     const pickupIntent = isWeekendPickupContext(userText);
@@ -3838,34 +3869,41 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       );
       const systemMessages = [
         { role: "system", content: SYSTEM_RULES },
-        { role: "system", content: getInventorySystemNote() },
+        { role: "system", content: buildTenantBehaviorSystemNote(tenant) },
         { role: "system", content: getSupportHoursSystemNote() },
         { role: "system", content: getReplyLanguageInstruction(senderId) },
-        { role: "system", content: buildRecommendationSystemNote() },
       ];
+      if (isRecommendationsEnabled(tenant) || isTenantFeatureEnabled("quotes", tenant)) {
+        systemMessages.push({ role: "system", content: getInventorySystemNote() });
+      }
+      if (isRecommendationsEnabled(tenant)) {
+        systemMessages.push({ role: "system", content: buildRecommendationSystemNote() });
+      }
       if (isWeekend()) {
         systemMessages.push({
           role: "system",
           content: getWeekendSystemNote(isWithinLiveSupportHours()),
         });
       }
-      if (
-        isOutsideCebuDeliveryInquiry(userText) ||
-        isOutsideCebuDeliveryInquiry(recentUserMessages(senderId, 4).join("\n"))
-      ) {
-        systemMessages.push({
-          role: "system",
-          content: getOutsideCebuSystemNote(),
-        });
-      }
-      if (
-        isCebuAreaDeliveryInquiry(userText) ||
-        isCebuAreaDeliveryInquiry(recentUserMessages(senderId, 4).join("\n"))
-      ) {
-        systemMessages.push({
-          role: "system",
-          content: getCebuDeliverySystemNote(),
-        });
+      if (isCebuDeliveryZonesEnabled(tenant)) {
+        if (
+          isOutsideCebuDeliveryInquiry(userText) ||
+          isOutsideCebuDeliveryInquiry(recentUserMessages(senderId, 4).join("\n"))
+        ) {
+          systemMessages.push({
+            role: "system",
+            content: getOutsideCebuSystemNote(),
+          });
+        }
+        if (
+          isCebuAreaDeliveryInquiry(userText) ||
+          isCebuAreaDeliveryInquiry(recentUserMessages(senderId, 4).join("\n"))
+        ) {
+          systemMessages.push({
+            role: "system",
+            content: getCebuDeliverySystemNote(),
+          });
+        }
       }
       if (hasImageAttachment && paymentResolution.action === "none") {
         systemMessages.push({
