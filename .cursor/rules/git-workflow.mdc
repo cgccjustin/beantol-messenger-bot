@@ -1,0 +1,22 @@
+---
+description: Git commit, push, and last-working-bot tag rules for this repo.
+alwaysApply: true
+---
+
+# Git workflow — Beantol bot
+
+## Commits and pushes
+
+- **Ask the user before every commit and push** unless they explicitly approve in the current message (e.g. "commit and push").
+- Do not commit `.env` or secrets.
+
+## `last-working-bot` tag (rollback bookmark)
+
+- **Do NOT move or create `last-working-bot`** as part of routine commits or pushes.
+- **Only update `last-working-bot`** when the user **explicitly** asks (e.g. "mark as last working bot", "update last-working-bot").
+- When updating: `git tag -f last-working-bot HEAD` then `git push -f origin last-working-bot` (only if user also asked to push the tag).
+- Current bookmark (as of user request): `dc37505` — docs + full bot through appointment/handoff/Cebu delivery work.
+
+## Revert reference for user
+
+To restore the bookmark locally: `git reset --hard last-working-bot`
