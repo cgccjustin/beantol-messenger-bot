@@ -124,6 +124,7 @@ const {
   processPostQuoteFlowPreAi,
   isPostQuotePickupConfirmTurn,
   isPostQuoteFlowActive,
+  clearPostQuoteSession,
   resumePostQuoteFromRepliedMessage,
 } = require("./lib/post-quote-flow");
 const {
@@ -3550,6 +3551,22 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     }
   }
 
+  if (wantsHumanHandoff(userText, senderId)) {
+    const existingHandoff = getHandoffSession(senderId);
+    if (existingHandoff?.mode === "agent_requested") {
+      console.log(
+        `Follow-up after agent request for ${senderId} — AI continues (team already notified).`
+      );
+    } else {
+      if (isPostQuoteFlowActive(senderId)) {
+        clearPostQuoteSession(senderId);
+      }
+      captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
+      await attemptCustomerHandoff(senderId, userText, "phrase match", platform, welcomeState);
+      return;
+    }
+  }
+
   const postQuoteFlow = processPostQuoteFlowPreAi(senderId, userText, {
     agentAvailable: isWithinLiveSupportHours(),
     isWeekend: isWeekend(),
@@ -3707,19 +3724,6 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     await notifyDeliveryByEmail(senderId, userText, "delivery rep requested", platform);
     await deliverCustomerReply(senderId, userText, platform, confirmMsg, welcomeState);
     return;
-  }
-
-  if (wantsHumanHandoff(userText, senderId)) {
-    const existingHandoff = getHandoffSession(senderId);
-    if (existingHandoff?.mode === "agent_requested") {
-      console.log(
-        `Follow-up after agent request for ${senderId} — AI continues (team already notified).`
-      );
-    } else {
-      captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
-      await attemptCustomerHandoff(senderId, userText, "phrase match", platform, welcomeState);
-      return;
-    }
   }
 
   if (await handleStructuredFlows(senderId, userText, platform, welcomeState)) {
