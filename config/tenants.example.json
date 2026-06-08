@@ -1,0 +1,72 @@
+{
+  "_comment": "Copy to tenants.json (gitignored) or set TENANTS_JSON on Render. Do NOT commit real tokens.",
+  "tenants": [
+    {
+      "id": "beantol",
+      "name": "Beantol Coffee Roasters",
+      "enabled": true,
+      "meta": {
+        "pageId": "YOUR_FACEBOOK_PAGE_NUMERIC_ID",
+        "pageAccessToken": "YOUR_PAGE_ACCESS_TOKEN",
+        "instagramAccountId": "",
+        "instagramUsername": "beantol"
+      },
+      "google": {
+        "knowledgeDocIds": "YOUR_DOC_ID:beantol-knowledge",
+        "leadsSheetId": "YOUR_GOOGLE_SHEET_ID",
+        "leadsSheetTab": "Leads",
+        "ordersSheetTab": "Orders",
+        "quotesSheetTab": "Quotes",
+        "appointmentsSheetTab": "Appointments",
+        "inventorySheetTab": "Inventory",
+        "eventsSheetTab": "Events"
+      },
+      "notify": {
+        "handoffEmail": "alerts@example.com",
+        "leadEmail": "alerts@example.com",
+        "orderEmail": "alerts@example.com"
+      },
+      "branding": {
+        "businessName": "Beantol Coffee Roasters",
+        "handoffReply": "",
+        "botResumeReply": ""
+      },
+      "features": {
+        "appointments": true,
+        "quotes": true,
+        "recommendations": true,
+        "cebuDeliveryZones": true,
+        "leadCapture": true,
+        "orderCapture": true
+      }
+    },
+    {
+      "id": "cafe-example",
+      "name": "Example Café Client",
+      "enabled": false,
+      "meta": {
+        "pageId": "",
+        "pageAccessToken": "",
+        "instagramAccountId": ""
+      },
+      "google": {
+        "knowledgeDocIds": "",
+        "leadsSheetId": ""
+      },
+      "notify": {
+        "handoffEmail": ""
+      },
+      "branding": {
+        "businessName": "Example Café"
+      },
+      "features": {
+        "appointments": false,
+        "quotes": true,
+        "recommendations": true,
+        "cebuDeliveryZones": false,
+        "leadCapture": true,
+        "orderCapture": true
+      }
+    }
+  ]
+}

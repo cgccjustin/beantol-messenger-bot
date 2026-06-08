@@ -27,7 +27,23 @@ const {
 } = require("./lib/payment-proof");
 const { enqueueInboundMessage } = require("./lib/inbound-debounce");
 const rag = require("./lib/rag");
-const { syncGoogleDocs, isGoogleSyncConfigured } = require("./lib/google-docs-sync");
+const {
+  syncGoogleDocs,
+  syncAllGoogleDocs,
+  isGoogleSyncConfigured,
+  isAnyGoogleSyncConfigured,
+} = require("./lib/google-docs-sync");
+const {
+  loadTenantRegistry,
+  listTenants,
+  getTenantById,
+  getTenantRegistry,
+  resolveTenantForWebhook,
+  registerTenantPageId,
+  getPageAccessToken,
+  tenantHasPageToken,
+} = require("./lib/tenant-registry");
+const { runWithTenant, getActiveTenant, scopeKey, parseScopedKey } = require("./lib/tenant-context");
 const {
   analyzeLeadSignal,
   analyzeOrderSignal,
@@ -220,17 +236,17 @@ const CHAT_HISTORY_TTL_MS =
 const chatHistories = new Map();
 
 function getChatHistory(senderId) {
-  const entry = chatHistories.get(senderId);
+  const entry = chatHistories.get(scopeKey(senderId));
   if (!entry) return [];
   if (Date.now() - entry.updatedAt > CHAT_HISTORY_TTL_MS) {
-    chatHistories.delete(senderId);
+    chatHistories.delete(scopeKey(senderId));
     return [];
   }
   return entry.messages;
 }
 
 function appendChatHistory(senderId, userText, assistantReply) {
-  let entry = chatHistories.get(senderId);
+  let entry = chatHistories.get(scopeKey(senderId));
   if (!entry) {
     entry = { messages: [], updatedAt: Date.now() };
   }
@@ -240,7 +256,7 @@ function appendChatHistory(senderId, userText, assistantReply) {
     entry.messages = entry.messages.slice(-CHAT_HISTORY_MAX_MESSAGES);
   }
   entry.updatedAt = Date.now();
-  chatHistories.set(senderId, entry);
+  chatHistories.set(scopeKey(senderId), entry);
 }
 
 function getSupportLocalHour() {
@@ -432,11 +448,11 @@ function isReplyLanguagePreferenceRequest(text) {
 
 function updateReplyLanguagePreference(senderId, userText) {
   const pref = detectReplyLanguagePreference(userText);
-  if (pref) replyLanguagePrefs.set(senderId, pref);
+  if (pref) replyLanguagePrefs.set(scopeKey(senderId), pref);
 }
 
 function getReplyLanguageInstruction(senderId) {
-  const pref = replyLanguagePrefs.get(senderId) || "en";
+  const pref = replyLanguagePrefs.get(scopeKey(senderId)) || "en";
   if (pref === "tl") {
     return "LANGUAGE FOR THIS REPLY: Write the entire message in Tagalog. Continue in Tagalog until the customer asks to switch back to English.";
   }
@@ -568,21 +584,26 @@ const openai = OPENAI_API_KEY
   : null;
 
 function shouldSyncGoogleDocsOnStartup() {
-  if (!isGoogleSyncConfigured()) return false;
-  // Default ON when Google Docs are configured; set RAG_SYNC_ON_STARTUP=false to disable.
+  if (!isAnyGoogleSyncConfigured()) return false;
   return process.env.RAG_SYNC_ON_STARTUP !== "false";
 }
 
 async function bootstrapKnowledge() {
+  loadTenantRegistry();
   rag.loadIndex();
 
-  if (!isGoogleSyncConfigured()) {
-    if (!rag.isReady() && openai) {
-      try {
-        console.log("RAG: no index — building from knowledge/sources...");
-        await rag.rebuildIndex(openai);
-      } catch (err) {
-        console.warn("RAG: auto-index failed (bot uses source fallback):", err.message);
+  const tenants = listTenants();
+  const anyGoogle = isAnyGoogleSyncConfigured();
+
+  if (!anyGoogle) {
+    for (const tenant of tenants) {
+      if (!rag.isReady(tenant) && openai) {
+        try {
+          console.log(`RAG [${tenant.id}]: no index — building from sources...`);
+          await rag.rebuildIndex(openai, tenant);
+        } catch (err) {
+          console.warn(`RAG [${tenant.id}]: auto-index failed:`, err.message);
+        }
       }
     }
     return;
@@ -590,9 +611,9 @@ async function bootstrapKnowledge() {
 
   if (shouldSyncGoogleDocsOnStartup()) {
     try {
-      console.log("RAG: syncing Google Docs on startup...");
-      await syncGoogleDocs();
-      if (openai) await rag.rebuildIndex(openai);
+      console.log("RAG: syncing Google Docs for all tenants...");
+      await syncAllGoogleDocs();
+      if (openai) await rag.rebuildAllIndexes(openai);
       return;
     } catch (err) {
       console.warn("RAG: startup Google sync failed:", err.message);
@@ -600,12 +621,14 @@ async function bootstrapKnowledge() {
     }
   }
 
-  if (!rag.isReady() && openai) {
-    try {
-      console.log("RAG: building index from knowledge/sources...");
-      await rag.rebuildIndex(openai);
-    } catch (err) {
-      console.warn("RAG: auto-index failed (bot uses source fallback):", err.message);
+  for (const tenant of tenants) {
+    if (!rag.isReady(tenant) && openai) {
+      try {
+        console.log(`RAG [${tenant.id}]: building index from sources...`);
+        await rag.rebuildIndex(openai, tenant);
+      } catch (err) {
+        console.warn(`RAG [${tenant.id}]: auto-index failed:`, err.message);
+      }
     }
   }
 }
@@ -682,18 +705,18 @@ function aiReplyIsDeliveryDetailsConfirmation(reply) {
 }
 
 function markDeliveryAgentOfferPending(senderId) {
-  deliveryAgentOfferPending.set(senderId, Date.now());
+  deliveryAgentOfferPending.set(scopeKey(senderId), Date.now());
 }
 
 function clearDeliveryAgentOfferPending(senderId) {
-  deliveryAgentOfferPending.delete(senderId);
+  deliveryAgentOfferPending.delete(scopeKey(senderId));
 }
 
 function isDeliveryAgentOfferPending(senderId) {
-  const at = deliveryAgentOfferPending.get(senderId);
+  const at = deliveryAgentOfferPending.get(scopeKey(senderId));
   if (!at) return false;
   if (Date.now() - at > DELIVERY_AGENT_OFFER_TTL_MS) {
-    deliveryAgentOfferPending.delete(senderId);
+    deliveryAgentOfferPending.delete(scopeKey(senderId));
     return false;
   }
   return true;
@@ -812,21 +835,21 @@ function normalizeHandoffSession(session) {
 
 /** Blocks AI only after an admin has replied from Business Suite. */
 function getAdminTakeover(senderId) {
-  const session = normalizeHandoffSession(handoffSessions.get(senderId));
+  const session = normalizeHandoffSession(handoffSessions.get(scopeKey(senderId)));
   if (!session || session.mode !== "admin_active") return null;
   if (Date.now() > session.expiresAt) return null;
   return session;
 }
 
 function getHandoffSession(senderId) {
-  return normalizeHandoffSession(handoffSessions.get(senderId));
+  return normalizeHandoffSession(handoffSessions.get(scopeKey(senderId)));
 }
 
 function requestHumanAgent(senderId, userText, platform = "messenger") {
   clearDeliveryAgentOfferPending(senderId);
   const existing = getHandoffSession(senderId);
   const now = Date.now();
-  handoffSessions.set(senderId, {
+  handoffSessions.set(scopeKey(senderId), {
     mode: "agent_requested",
     handedOffAt: existing?.handedOffAt || now,
     expiresAt: 0,
@@ -838,7 +861,7 @@ function requestHumanAgent(senderId, userText, platform = "messenger") {
 function activateAdminTakeover(customerId, adminText, platform = "messenger") {
   const existing = getHandoffSession(customerId);
   const now = Date.now();
-  handoffSessions.set(customerId, {
+  handoffSessions.set(scopeKey(customerId), {
     mode: "admin_active",
     handedOffAt: existing?.handedOffAt || now,
     expiresAt: now + HANDOFF_ADMIN_IDLE_MS,
@@ -847,9 +870,18 @@ function activateAdminTakeover(customerId, adminText, platform = "messenger") {
   });
 }
 
-function resolveHandoff(senderId) {
+function findHandoffStorageKey(senderId, tenantId) {
+  if (tenantId) return `${tenantId}:${senderId}`;
+  for (const key of handoffSessions.keys()) {
+    const parsed = parseScopedKey(key);
+    if (parsed.senderId === String(senderId)) return key;
+  }
+  return scopeKey(senderId);
+}
+
+function resolveHandoff(senderId, tenantId) {
   clearDeliveryAgentOfferPending(senderId);
-  return handoffSessions.delete(senderId);
+  return handoffSessions.delete(findHandoffStorageKey(senderId, tenantId));
 }
 
 function isSupportedWebhookObject(object) {
@@ -1173,17 +1205,25 @@ async function handlePageOutbound(event, platform = "messenger", entryId = "") {
 
 async function expireStaleAdminTakeovers() {
   const expired = [];
-  for (const [senderId, rawSession] of handoffSessions.entries()) {
+  for (const [scopedKey, rawSession] of handoffSessions.entries()) {
     const session = normalizeHandoffSession(rawSession);
     if (!session || session.mode !== "admin_active") continue;
     if (Date.now() <= session.expiresAt) continue;
-    expired.push(senderId);
+    expired.push(scopedKey);
   }
-  for (const senderId of expired) {
+  for (const scopedKey of expired) {
+    const { tenantId, senderId } = parseScopedKey(scopedKey);
+    const tenant = getTenantById(tenantId);
     console.log(
-      `Admin takeover idle timeout for ${senderId} (${HANDOFF_ADMIN_IDLE_MINUTES}m) — auto-resuming AI.`
+      `Admin takeover idle timeout for ${senderId} [${tenantId}] (${HANDOFF_ADMIN_IDLE_MINUTES}m) — auto-resuming AI.`
     );
-    await resumeBotForCustomer(senderId, "(auto-resume after admin idle)");
+    if (tenant) {
+      await runWithTenant(tenant, () =>
+        resumeBotForCustomer(senderId, "(auto-resume after admin idle)")
+      );
+    } else {
+      await resumeBotForCustomer(senderId, "(auto-resume after admin idle)");
+    }
   }
 }
 
@@ -1613,13 +1653,13 @@ async function notifyHandoffByEmail(senderId, userText, platform = "messenger") 
 }
 
 function shouldSendDeliveryAlert(senderId) {
-  const expiresAt = deliveryAlertCooldowns.get(senderId);
+  const expiresAt = deliveryAlertCooldowns.get(scopeKey(senderId));
   if (expiresAt && Date.now() < expiresAt) return false;
   return true;
 }
 
 function markDeliveryAlertSent(senderId) {
-  deliveryAlertCooldowns.set(senderId, Date.now() + DELIVERY_ALERT_COOLDOWN_MS);
+  deliveryAlertCooldowns.set(scopeKey(senderId), Date.now() + DELIVERY_ALERT_COOLDOWN_MS);
 }
 
 async function notifyDeliveryByEmail(
@@ -1708,15 +1748,18 @@ function listActiveHandoffs() {
   const now = Date.now();
   const handoffs = [];
 
-  for (const [senderId, rawSession] of handoffSessions.entries()) {
+  for (const [scopedKey, rawSession] of handoffSessions.entries()) {
     const session = normalizeHandoffSession(rawSession);
     if (!session) continue;
     if (session.mode === "admin_active" && now > session.expiresAt) {
-      handoffSessions.delete(senderId);
+      handoffSessions.delete(scopedKey);
       continue;
     }
+    const { tenantId, senderId } = parseScopedKey(scopedKey);
     handoffs.push({
       senderId,
+      tenantId,
+      scopedKey,
       mode: session.mode,
       platform: session.platform || "messenger",
       handedOffAt: new Date(session.handedOffAt).toISOString(),
@@ -2719,9 +2762,17 @@ app.get("/admin/quotes", async (req, res) => {
 
 app.get("/admin/knowledge-status", (req, res) => {
   if (!requireAdmin(req, res)) return;
+  const tenantId = req.query.tenant;
+  const tenant = tenantId ? getTenantById(tenantId) : null;
   res.json({
-    ...rag.getIndexStatus(),
-    googleSyncConfigured: isGoogleSyncConfigured(),
+    ...(tenant ? rag.getIndexStatus(tenant) : rag.getIndexStatus()),
+    multiTenant: listTenants().map((t) => ({
+      id: t.id,
+      name: t.name,
+      pageId: t.meta.pageId || null,
+      googleSyncConfigured: isGoogleSyncConfigured(t),
+    })),
+    googleSyncConfigured: isAnyGoogleSyncConfigured(),
     syncOnStartup: shouldSyncGoogleDocsOnStartup(),
     leadCaptureConfigured: isLeadCaptureConfigured(),
     orderCaptureConfigured: isOrderCaptureConfigured(),
@@ -2729,7 +2780,28 @@ app.get("/admin/knowledge-status", (req, res) => {
     inventorySheetConfigured: isInventorySheetConfigured(),
     eventsLogConfigured: isEventsLogConfigured(),
     appointmentCaptureConfigured: isAppointmentCaptureConfigured(),
-    hint: "Edit Google Docs (production) or knowledge/sources/*.md (local). After Doc edits: /admin/sync-knowledge",
+    hint: "Edit Google Docs per tenant. Sync: /admin/sync-knowledge (all) or ?tenant=ID. Legacy env mode uses one implicit tenant.",
+  });
+});
+
+app.get("/admin/tenants", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const reg = getTenantRegistry();
+  res.json({
+    ok: true,
+    legacyMode: reg.legacyMode,
+    count: reg.tenants.length,
+    tenants: reg.tenants.map((t) => ({
+      id: t.id,
+      name: t.name,
+      pageId: t.meta.pageId || null,
+      hasPageToken: tenantHasPageToken(t),
+      instagramAccountId: t.meta.instagramAccountId || null,
+      knowledgeDocIds: Boolean(t.google.knowledgeDocIds),
+      leadsSheetId: Boolean(t.google.leadsSheetId),
+      features: t.features,
+    })),
+    hint: "Add tenants via config/tenants.json or TENANTS_JSON on Render. Without either, legacy single-tenant env mode is used.",
   });
 });
 
@@ -2773,12 +2845,21 @@ app.get("/admin/reindex-knowledge", async (req, res) => {
     return res.status(503).json({ error: "OPENAI_API_KEY required to build embeddings index." });
   }
   try {
-    const result = await rag.rebuildIndex(openai);
+    const tenantId = req.query.tenant;
+    const tenant = tenantId ? getTenantById(tenantId) : null;
+    if (tenantId && !tenant) {
+      return res.status(404).json({ error: `Unknown tenant: ${tenantId}` });
+    }
+    const result = tenant
+      ? await rag.rebuildIndex(openai, tenant)
+      : await rag.rebuildAllIndexes(openai);
     res.json({
       ok: true,
+      tenantId: tenant?.id || "all",
       chunkCount: result.chunkCount,
       builtAt: result.builtAt,
       model: result.model,
+      results: Array.isArray(result) ? result : undefined,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2787,23 +2868,32 @@ app.get("/admin/reindex-knowledge", async (req, res) => {
 
 app.get("/admin/sync-knowledge", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  if (!isGoogleSyncConfigured()) {
+  if (!isAnyGoogleSyncConfigured()) {
     return res.status(400).json({
       error: "Google sync not configured.",
-      hint: "Set GOOGLE_SERVICE_ACCOUNT_JSON and GOOGLE_KNOWLEDGE_DOC_IDS on Render. See knowledge/README.md",
+      hint: "Set GOOGLE_SERVICE_ACCOUNT_JSON and knowledgeDocIds per tenant. See docs/MULTI-TENANT.md",
     });
   }
   if (!openai) {
     return res.status(503).json({ error: "OPENAI_API_KEY required to re-index after sync." });
   }
   try {
-    const sync = await syncGoogleDocs();
-    const index = await rag.rebuildIndex(openai);
+    const tenantId = req.query.tenant;
+    const tenant = tenantId ? getTenantById(tenantId) : null;
+    if (tenantId && !tenant) {
+      return res.status(404).json({ error: `Unknown tenant: ${tenantId}` });
+    }
+    const sync = tenant ? await syncGoogleDocs(tenant) : await syncAllGoogleDocs();
+    const index = tenant
+      ? await rag.rebuildIndex(openai, tenant)
+      : await rag.rebuildAllIndexes(openai);
     res.json({
       ok: true,
-      synced: sync.synced,
+      tenantId: tenant?.id || "all",
+      synced: sync.synced || sync,
       chunkCount: index.chunkCount,
       builtAt: index.builtAt,
+      results: Array.isArray(index) ? index : undefined,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2917,25 +3007,38 @@ async function resolveHandoffHandler(req, res) {
   if (!requireAdmin(req, res)) return;
 
   const { senderId } = req.params;
-  const removed = resolveHandoff(senderId);
+  const tenantId = req.query.tenant ? String(req.query.tenant) : undefined;
+  const tenant = tenantId ? getTenantById(tenantId) : null;
+
+  const doResolve = async () => {
+    const removed = resolveHandoff(senderId, tenantId);
+    if (!removed) return false;
+    console.log(`Handoff resolved for ${senderId}${tenantId ? ` [${tenantId}]` : ""} by admin API.`);
+    if (req.query.sendResume === "1") {
+      try {
+        await sendMessageWithFallback(senderId, BOT_RESUME_REPLY);
+      } catch (err) {
+        console.error(`Resolve sendResume failed for ${senderId}:`, err.message);
+      }
+    }
+    return true;
+  };
+
+  let removed;
+  if (tenant) {
+    removed = await runWithTenant(tenant, doResolve);
+  } else {
+    removed = await doResolve();
+  }
 
   if (!removed) {
     return res.status(404).json({ error: "No active handoff for this sender." });
   }
 
-  console.log(`Handoff resolved for ${senderId} by admin API.`);
-
-  if (req.query.sendResume === "1") {
-    try {
-      await sendMessageWithFallback(senderId, BOT_RESUME_REPLY);
-    } catch (err) {
-      console.error(`Resolve sendResume failed for ${senderId}:`, err.message);
-    }
-  }
-
   const payload = {
     ok: true,
     senderId,
+    tenantId: tenantId || null,
     message: "Handoff cleared. Bot will auto-reply again.",
     resumeMessageSent: req.query.sendResume === "1",
   };
@@ -3169,9 +3272,15 @@ async function processWebhookEvents(body) {
   await expireStaleAdminTakeovers();
 
   for (const { event, channel, platform, entryId } of collectMessagingEvents(body)) {
+    const tenant = resolveTenantForWebhook({ entryId, platform, event });
+    if (!tenant) {
+      console.warn(`Webhook ${platform}/${channel}: no tenant matched entry=${entryId}`);
+      continue;
+    }
+
     if (channel === "messaging_handovers") {
       try {
-        await handleHandoverEvent(event, platform);
+        await runWithTenant(tenant, () => handleHandoverEvent(event, platform));
       } catch (err) {
         console.error(`Handover event error (${platform}):`, err.message);
       }
@@ -3208,7 +3317,7 @@ async function processWebhookEvents(body) {
     }
 
     if (isOutboundFromPage(event, entryId, platform)) {
-      await handlePageOutbound(event, platform, entryId);
+      await runWithTenant(tenant, () => handlePageOutbound(event, platform, entryId));
       continue;
     }
 
@@ -3234,9 +3343,14 @@ async function processWebhookEvents(body) {
     }
 
     try {
-      enqueueInboundMessage(event.sender.id, text, platform, { event }, handleMessage);
+      await runWithTenant(tenant, async () => {
+        if (entryId && !tenant.meta.pageId) {
+          registerTenantPageId(tenant.id, entryId);
+        }
+        enqueueInboundMessage(event.sender.id, text, platform, { event }, handleMessage);
+      });
     } catch (err) {
-      console.error(`Error handling ${platform} message:`, err.message);
+      console.error(`Error handling ${platform} message [${tenant.id}]:`, err.message);
     }
   }
 }
@@ -3620,7 +3734,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   } else {
     try {
       const history = getChatHistory(senderId);
-      const knowledgeContext = await rag.retrieveKnowledgeContext(openai, userText);
+      const knowledgeContext = await rag.retrieveKnowledgeContext(
+        openai,
+        userText,
+        getActiveTenant()
+      );
       const systemMessages = [
         { role: "system", content: SYSTEM_RULES },
         { role: "system", content: getInventorySystemNote() },
@@ -3858,7 +3976,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
 }
 
 async function sendMessage(recipientId, text, options = {}) {
-  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+  const token = getPageAccessToken(getActiveTenant());
+  if (!token) {
+    throw new Error("Page access token not configured for this tenant.");
+  }
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${token}`;
   const payload = {
     recipient: { id: recipientId },
     message: { text },
@@ -3928,9 +4050,12 @@ async function sendMessageWithFallback(recipientId, text) {
 
 // --- Startup checks ---
 function checkConfig() {
+  loadTenantRegistry();
   const missing = [];
   if (!VERIFY_TOKEN) missing.push("VERIFY_TOKEN");
-  if (!PAGE_ACCESS_TOKEN) missing.push("PAGE_ACCESS_TOKEN");
+  const tenants = listTenants();
+  const anyToken = tenants.some((t) => tenantHasPageToken(t)) || PAGE_ACCESS_TOKEN;
+  if (!anyToken) missing.push("PAGE_ACCESS_TOKEN (or tenant meta.pageAccessToken)");
   if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY (bot will send a placeholder reply)");
   if (!ADMIN_SECRET) missing.push("ADMIN_SECRET (admin handoff endpoints disabled)");
   if (!isEmailConfigured()) {
@@ -4186,12 +4311,12 @@ function hasMessageEchoesSubscription(status) {
     console.log(`Webhook URL path: /webhook (Facebook Page + Instagram)`);
     console.log(
       `RAG: ${rag.isReady() ? "index loaded" : "source-file fallback until indexed"}${
-        isGoogleSyncConfigured()
+        isAnyGoogleSyncConfigured()
           ? shouldSyncGoogleDocsOnStartup()
             ? " | Google Doc sync on startup: ON"
             : " | Google Doc sync on startup: OFF (RAG_SYNC_ON_STARTUP=false)"
           : ""
-      }`
+      } | Tenants: ${listTenants().length}`
     );
     console.log(
       `Leads: ${isLeadCaptureConfigured() ? "Google Sheet capture ON" : "not configured (set GOOGLE_LEADS_SHEET_ID)"}`

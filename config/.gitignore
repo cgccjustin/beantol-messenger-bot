@@ -1,0 +1,4 @@
+# Local tenant config with secrets — copy from tenants.example.json
+# Never commit this file.
+
+tenants.json
