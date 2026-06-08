@@ -45,12 +45,88 @@ Delivery within Cebu Province (outside Maxim zones — e.g. Naga, Carcar)
 
 Menu & Prices
 
-[List your drinks, food, beans, or retail items with prices. Be specific — the bot reads this for answers.]
+Tagline: Freedom from the Ordinary.
 
-Example format:
-• Espresso — ₱XX
-• Latte — ₱XX
-• House blend beans 250g — ₱XX
+Prices below are in Philippine pesos (₱). Classic drinks list Hot / Cold prices where both are available.
+
+
+Classic Drinks (Hot / Cold)
+
+• Latte — ₱150 hot / ₱160 cold
+• Cappuccino — ₱155 hot / ₱165 cold
+• Americano — ₱130 hot / ₱140 cold
+• Spanish Latte — ₱160 hot / ₱170 cold
+• Mocha — ₱160 hot / ₱170 cold
+
+
+KK Favorites (Cold only)
+
+• White Brew — ₱180
+• Cloud Cream Brew — ₱190
+• Fizzy Berry — ₱180
+• Fizzy Cucumber — ₱180
+• Fizzy Lemon — ₱180
+• Himalayan Latte — ₱200
+
+
+Non-Coffee Based
+
+Cold:
+• Chocolate — ₱150
+• Strawberry — ₱170
+• Passion Fruit — ₱170
+
+Hot:
+• Oolong Tea — ₱150
+• Tablea Tsokolate — ₱135
+
+
+Pour Over
+
+• Pour Over (any beans) — ₱170
+
+
+Sweet Treats & Snacks
+
+• Flavored Fries — ₱80
+• Empanada (3 pcs) — ₱100
+• I Love You Ensaymada — ₱85 without filling / ₱95 with filling
+• Creamy Carbonara — ₱200
+• Puto Cheese (per piece) — ₱15
+• Suman Lihiya (3 pcs) — ₱60
+• Siomai (3 pcs) — ₱50
+• Creamcheese Garlic Bread — ₱90
+• Cheesecake Delight — ₱95
+
+
+Meals
+
+• Pork Chop with Egg — ₱145
+• Sisig with Egg — ₱130
+• Humba with Egg — ₱150
+• Ramyun with Egg — ₱120
+
+
+Extras
+
+• Bottled Water — ₱25
+• 1 Cup Rice — ₱25
+• Egg (add-on) — ₱25
+
+
+Menu FAQ
+
+Q: What are your bestsellers / KK Favorites?
+A: Our KK Favorites (cold) include White Brew, Cloud Cream Brew, Fizzy Berry, Fizzy Cucumber, Fizzy Lemon, and Himalayan Latte. See prices under KK Favorites above.
+
+Q: Do you have non-coffee drinks?
+A: Yes — chocolate, strawberry, passion fruit (cold), oolong tea, and tablea tsokolate (hot).
+
+Q: Do you serve food / meals?
+A: Yes — sweet treats & snacks, and meals (pork chop, sisig, humba, ramyun with egg). See Menu & Prices above.
+
+Q: How much is a latte / cappuccino / americano?
+A: Latte ₱150 hot / ₱160 cold. Cappuccino ₱155 / ₱165. Americano ₱130 / ₱140. Spanish Latte ₱160 / ₱170. Mocha ₱160 / ₱170.
 
 
 
@@ -84,8 +160,8 @@ A: No.Pick up only You can keep messaging here with questions while you wait.
 
 Pickup
 
-• Address: [Same as above or pickup counter instructions]
-• Hours: [Pickup hours]
+• Address: Holy Family Village 2, Governor Cuenco Avenue, Banilad, Cebu City (beside the guardhouse).
+• Hours: Monday to Friday, 9:00 AM to 6:00 PM. Closed Saturdays and Sundays.
 
 
 

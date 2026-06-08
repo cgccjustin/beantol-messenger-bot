@@ -7,7 +7,6 @@ require("dotenv").config();
 const express = require("express");
 const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
-const { SYSTEM_RULES } = require("./system-rules");
 const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote, buildNonWholesaleBulkSystemNote } = require("./lib/pricing");
 const {
   isWeekend,
@@ -55,8 +54,8 @@ const {
   isCebuDeliveryZonesEnabled,
   isRecommendationsEnabled,
   isTenantFeatureEnabled,
-  buildTenantBehaviorSystemNote,
 } = require("./lib/tenant-features");
+const { getSystemRulesForTenant } = require("./lib/tenant-system-rules");
 const { isAppointmentCaptureEnabledForTenant } = require("./lib/tenant-google");
 const {
   analyzeLeadSignal,
@@ -2912,8 +2911,10 @@ app.get("/admin/tenants", (req, res) => {
       knowledgeDocIds: Boolean(t.google.knowledgeDocIds),
       leadsSheetId: Boolean(t.google.leadsSheetId),
       features: t.features,
+      rulesProfile: t.rules?.profile || null,
     })),
-    hint: "Add tenants via config/tenants.json or TENANTS_JSON on Render. Without either, legacy single-tenant env mode is used.",
+    availableRulesProfiles: require("./lib/tenant-system-rules").listAvailableProfiles(),
+    hint: "Add tenants via config/tenants.json or TENANTS_JSON on Render. Per-tenant AI rules: rules.profile (beantol|cafe|custom) + knowledge/tenant-rules/. See knowledge/tenant-rules/README.md",
   });
 });
 
@@ -3868,8 +3869,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         getActiveTenant()
       );
       const systemMessages = [
-        { role: "system", content: SYSTEM_RULES },
-        { role: "system", content: buildTenantBehaviorSystemNote(tenant) },
+        { role: "system", content: getSystemRulesForTenant(tenant) },
         { role: "system", content: getSupportHoursSystemNote() },
         { role: "system", content: getReplyLanguageInstruction(senderId) },
       ];

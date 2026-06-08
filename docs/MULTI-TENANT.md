@@ -63,7 +63,8 @@ Handoff resolve with multiple tenants: add `?tenant=beantol` when needed.
 |------------|-------------------------|
 | Page token, Doc, Sheet | `VERIFY_TOKEN`, webhook URL |
 | RAG index, chat sessions | OpenAI API key, service account |
-| Handoffs, wizards | Code (`system-rules.js`, flows) |
+| Handoffs, wizards | Shared code flows |
+| AI behavior rules | Per tenant: `rules.profile` + `knowledge/tenant-rules/` (Beantol uses `system-rules.js`) |
 | Email notify addresses | Resend / SMTP config |
 
 ## Plug-and-play checklist for a new café client
@@ -78,7 +79,7 @@ See **`docs/KAPE-KRISTIANO-SETUP.md`** for a full step-by-step (Beantol stays li
 6. `GET /admin/sync-knowledge?token=…`  
 7. Test from a personal Facebook account  
 
-Customize later: `features.cebuDeliveryZones: false`, branding, per-tenant `system-rules` profiles (future).
+Customize per shop: `rules.profile` (`beantol` | `cafe` | `custom`), `tenants/{id}.md` overrides, `features.*`, branding. See `knowledge/tenant-rules/README.md`.
 
 ## Rollback
 

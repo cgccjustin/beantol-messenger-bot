@@ -44,6 +44,10 @@
         "cebuDeliveryZones": true,
         "leadCapture": true,
         "orderCapture": true
+      },
+      "rules": {
+        "profile": "beantol",
+        "extra": ""
       }
     },
     {
@@ -89,6 +93,10 @@
         "cebuDeliveryZones": false,
         "leadCapture": true,
         "orderCapture": true
+      },
+      "rules": {
+        "profile": "cafe",
+        "extra": ""
       }
     }
   ]
