@@ -214,8 +214,11 @@ const AFTER_HOURS_HANDOFF_REPLY =
   process.env.AFTER_HOURS_HANDOFF_REPLY ||
   "Sorry — there is no customer support agent available to chat at this hour. Our team can connect with you live on Messenger daily from 9:00 AM to 9:00 PM (Philippine time). I can still help you here with questions about coffee, prices, orders, and delivery. You can also leave your message and check back during support hours, or message again between 9 AM and 9 PM when an agent can assist. How can I help you now?";
 
-/** @type {Map<string, { mode: "agent_requested" | "admin_active", handedOffAt: number, expiresAt: number, lastMessage: string, platform: string }>} */
+/** @type {Map<string, { mode: "agent_requested" | "admin_active", handedOffAt: number, expiresAt: number, lastMessage: string, platform: string, lastAdminReplyAt?: number, pendingClientMessage?: { text: string, at: number } | null }>} */
 const handoffSessions = new Map();
+
+/** One-shot prefix for the first bot reply after handoff resume catch-up. */
+const handoffCatchUpContext = new Map();
 
 /** @type {Map<string, 'en' | 'tl' | 'ceb'>} */
 const replyLanguagePrefs = new Map();
@@ -868,6 +871,8 @@ function activateAdminTakeover(customerId, adminText, platform = "messenger") {
     expiresAt: now + HANDOFF_ADMIN_IDLE_MS,
     lastMessage: String(adminText || existing?.lastMessage || "Admin replied").trim(),
     platform: existing?.platform || platform,
+    lastAdminReplyAt: now,
+    pendingClientMessage: existing?.pendingClientMessage || null,
   });
 }
 
@@ -882,7 +887,84 @@ function findHandoffStorageKey(senderId, tenantId) {
 
 function resolveHandoff(senderId, tenantId) {
   clearDeliveryAgentOfferPending(senderId);
+  handoffCatchUpContext.delete(findHandoffStorageKey(senderId, tenantId));
   return handoffSessions.delete(findHandoffStorageKey(senderId, tenantId));
+}
+
+function isTrivialClientAck(text) {
+  const t = String(text || "").trim();
+  if (!t || t.length > 36) return false;
+  return /^(?:ok(?:ay)?|thanks?(?: you| po)?|salamat(?: po)?|noted|got it|sige|👍|🙏)[\s!.]*$/iu.test(t);
+}
+
+function recordClientMessageDuringTakeover(senderId, userText) {
+  const session = getHandoffSession(senderId);
+  if (!session || session.mode !== "admin_active") return;
+  const text = String(userText || "").trim();
+  if (!text || isTrivialClientAck(text)) return;
+  session.pendingClientMessage = { text, at: Date.now() };
+  handoffSessions.set(scopeKey(senderId), session);
+}
+
+function getMissedClientMessageDuringTakeover(session) {
+  const pending = session?.pendingClientMessage;
+  if (!pending?.text?.trim()) return null;
+  const lastAdmin = session.lastAdminReplyAt || session.handedOffAt || 0;
+  if (pending.at <= lastAdmin) return null;
+  return pending;
+}
+
+const HANDOFF_CATCHUP_APOLOGY =
+  process.env.HANDOFF_CATCHUP_APOLOGY ||
+  "Sorry — it looks like your last message may have been missed while our team was assisting you. Here's my best answer:";
+
+function replyLooksUncertainForCatchUp(reply) {
+  const t = String(reply || "").trim();
+  if (!t || t.length < 24) return true;
+  if (isAiHandoffReply(t)) return false;
+  return /\b(?:I(?:'m| am) not sure|I cannot|I can't|unable to|don't have (?:that )?information|could not generate|having trouble right now|cannot view|outside (?:of )?what I|beyond what I)\b/i.test(
+    t
+  );
+}
+
+function buildHumanOfferAfterCatchUp(agentAvailable) {
+  if (agentAvailable) {
+    return (
+      "\n\nIf this doesn't fully answer your question, reply YES or ask for an agent and we'll alert our team."
+    );
+  }
+  return (
+    "\n\nIf you still need a person, message us again during live support hours (9 AM–9 PM Philippine time) and ask for an agent."
+  );
+}
+
+function applyHandoffCatchUpToReply(senderId, userText, reply) {
+  const catchUp = handoffCatchUpContext.get(scopeKey(senderId));
+  if (!catchUp) return reply;
+
+  handoffCatchUpContext.delete(scopeKey(senderId));
+  let message = `${HANDOFF_CATCHUP_APOLOGY}\n\n${String(reply || "").trim()}`.trim();
+  if (replyLooksUncertainForCatchUp(reply) && !isAiHandoffReply(reply)) {
+    message += buildHumanOfferAfterCatchUp(isWithinLiveSupportHours());
+  }
+  return message;
+}
+
+async function processMissedClientMessageAfterHandoff(senderId, userText, platform) {
+  const text = String(userText || "").trim();
+  if (!text) return;
+
+  console.log(
+    `Handoff catch-up for ${senderId} — answering missed client message: ${text.slice(0, 120)}`
+  );
+  handoffCatchUpContext.set(scopeKey(senderId), { userText: text });
+  try {
+    await handleMessage(senderId, text, platform, { afterHandoffCatchUp: true });
+  } catch (err) {
+    console.error(`Handoff catch-up failed for ${senderId}:`, err.message);
+  } finally {
+    handoffCatchUpContext.delete(scopeKey(senderId));
+  }
 }
 
 function isSupportedWebhookObject(object) {
@@ -1098,7 +1180,11 @@ function pauseBotForAdminTakeover(customerId, adminText, platform = "messenger")
 const RESUME_SEND_DELAY_MS = Number(process.env.RESUME_SEND_DELAY_MS || 1200);
 
 async function resumeBotForCustomer(customerId, adminText) {
-  const hadHandoff = Boolean(getHandoffSession(customerId));
+  const session = getHandoffSession(customerId);
+  const missed =
+    session?.mode === "admin_active" ? getMissedClientMessageDuringTakeover(session) : null;
+  const platform = session?.platform || "messenger";
+  const hadHandoff = Boolean(session);
   resolveHandoff(customerId);
   console.log(
     `Resume command "${adminText}" for ${customerId} — handoff cleared (was paused: ${hadHandoff}).`
@@ -1113,6 +1199,13 @@ async function resumeBotForCustomer(customerId, adminText) {
     console.log(`Resume confirmation sent to ${customerId}.`);
   } catch (err) {
     console.error(`Resume confirmation failed for ${customerId}:`, err.message);
+  }
+
+  if (missed) {
+    if (RESUME_SEND_DELAY_MS > 0) {
+      await new Promise((resolve) => setTimeout(resolve, RESUME_SEND_DELAY_MS));
+    }
+    await processMissedClientMessageAfterHandoff(customerId, missed.text, platform);
   }
 }
 
@@ -3012,16 +3105,14 @@ async function resolveHandoffHandler(req, res) {
   const tenant = tenantId ? getTenantById(tenantId) : null;
 
   const doResolve = async () => {
-    const removed = resolveHandoff(senderId, tenantId);
-    if (!removed) return false;
-    console.log(`Handoff resolved for ${senderId}${tenantId ? ` [${tenantId}]` : ""} by admin API.`);
+    const session = getHandoffSession(senderId);
+    if (!session) return false;
     if (req.query.sendResume === "1") {
-      try {
-        await sendMessageWithFallback(senderId, BOT_RESUME_REPLY);
-      } catch (err) {
-        console.error(`Resolve sendResume failed for ${senderId}:`, err.message);
-      }
+      await resumeBotForCustomer(senderId, "(admin dashboard resume)");
+      return true;
     }
+    resolveHandoff(senderId, tenantId);
+    console.log(`Handoff resolved for ${senderId}${tenantId ? ` [${tenantId}]` : ""} by admin API.`);
     return true;
   };
 
@@ -3359,6 +3450,7 @@ async function processWebhookEvents(body) {
 async function deliverCustomerReply(senderId, userText, platform, reply, welcomeState = null) {
   let message = String(reply || "").trim();
   if (!message) return;
+  message = applyHandoffCatchUpToReply(senderId, userText, message);
   if (welcomeState && !welcomeState.done) {
     message = applyWelcomeToReply(message, senderId, welcomeState);
   }
@@ -3459,6 +3551,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
 
   const adminTakeover = getAdminTakeover(senderId);
   if (adminTakeover) {
+    recordClientMessageDuringTakeover(senderId, userText);
     console.log(
       `Skipping auto-reply for ${senderId} — admin takeover active (idle resume ${new Date(adminTakeover.expiresAt).toISOString()}).`
     );
@@ -3831,6 +3924,13 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           role: "system",
           content:
             "HANDOFF STATUS: This customer asked for a human agent and the team was emailed. No admin has taken over yet — keep answering their questions helpfully. Do NOT output [[HANDOFF]] again unless they explicitly say they cannot wait for a person.",
+        });
+      }
+      if (handoffCatchUpContext.has(scopeKey(senderId))) {
+        systemMessages.push({
+          role: "system",
+          content:
+            "CATCH-UP: The customer sent this message while a human admin had taken over the chat; the admin may not have seen it. Answer their question directly and helpfully. Use [[HANDOFF]] only if you truly cannot help and they need a person.",
         });
       }
       const completion = await openai.chat.completions.create({
