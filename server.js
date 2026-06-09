@@ -57,6 +57,7 @@ const {
 } = require("./lib/tenant-features");
 const { getSystemRulesForTenant } = require("./lib/tenant-system-rules");
 const { isAppointmentCaptureEnabledForTenant } = require("./lib/tenant-google");
+const { buildClosuresSystemNote } = require("./lib/shop-closures");
 const {
   analyzeLeadSignal,
   analyzeOrderSignal,
@@ -2228,6 +2229,7 @@ ${renderToolCard("Re-subscribe webhooks", "Register Page webhook fields (message
 ${renderToolCard("Webhook debug log", "See recent echoes — human admin replies show human=true.", u("/admin/webhook-log"))}
 ${renderToolCard("Test email", "Send a test alert to HANDOFF_NOTIFY_EMAIL.", u("/admin/test-email"), true)}
 ${renderToolCard("Meta / Instagram status", "Check whether Instagram is linked to your Page token.", u("/admin/meta-status"), true)}
+${renderToolCard("Shop closures", "Set special closure dates (holidays, events) in Google Sheet — bot picks them up automatically.", u("/admin/closures/view"))}
 ${renderToolCard("Sync knowledge (Google Doc)", "Pull latest Q&A from Google Docs into the bot.", u("/admin/sync-knowledge"), true)}
 ${renderToolCard("Reindex knowledge", "Rebuild search index from local + synced sources.", u("/admin/reindex-knowledge"), true)}
 ${renderToolCard("Knowledge status", "See indexed chunks and last sync time.", u("/admin/knowledge-status"), true)}
@@ -2800,6 +2802,63 @@ app.post("/admin/inventory/:productId/update", async (req, res) => {
   } catch (err) {
     res.redirect(
       `/admin/inventory/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
+    );
+  }
+});
+
+// --- Admin: shop closures ---
+app.get("/admin/closures/view", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = req.query.token || "";
+  const { loadClosures, formatClosureDate } = require("./lib/shop-closures");
+  try {
+    const closures = await loadClosures(true);
+    const today = new Intl.DateTimeFormat("en-CA", {
+      timeZone: process.env.SUPPORT_TIMEZONE || "Asia/Manila",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(new Date());
+
+    const rows = closures
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((c) => {
+        const past = c.date < today;
+        return `<tr class="${past ? "muted" : ""}">
+          <td>${escapeHtml(c.date)}</td>
+          <td>${escapeHtml(formatClosureDate(c.date))}</td>
+          <td>${escapeHtml(c.reason || "—")}</td>
+          <td>${escapeHtml(c.notes || "—")}</td>
+        </tr>`;
+      })
+      .join("");
+
+    const { getLeadsSheetId, getClosuresSheetTab } = require("./lib/tenant-google");
+    const sheetId = getLeadsSheetId();
+    const tab = getClosuresSheetTab();
+    const sheetUrl = sheetId
+      ? `https://docs.google.com/spreadsheets/d/${sheetId}/edit#gid=0`
+      : null;
+
+    const body = `
+<p class="muted">Special shop closures (holidays, events, etc.). The bot reads this sheet every 30 minutes and blocks appointment bookings on these dates. Past dates shown greyed out.</p>
+<p>
+  ${sheetUrl ? `<a class="btn" href="${escapeHtml(sheetUrl)}" target="_blank" rel="noopener">Open Google Sheet (${escapeHtml(tab)} tab)</a>` : ""}
+  <a class="btn btn-sm" href="/admin/closures/view?token=${encodeURIComponent(token)}">Refresh</a>
+</p>
+<h3>How to add a closure</h3>
+<ol>
+  <li>Open the Google Sheet → <strong>${escapeHtml(tab)}</strong> tab (created automatically on first bot startup).</li>
+  <li>Add a row: <code>Date</code> (YYYY-MM-DD) | <code>Reason</code> (e.g. "National Holiday — Eid al-Adha") | <code>Notes</code> (optional extra detail).</li>
+  <li>The bot picks it up within 30 minutes — no redeploy needed.</li>
+</ol>
+${rows
+  ? `<table><tr><th>Date (ISO)</th><th>Friendly date</th><th>Reason</th><th>Notes</th></tr>${rows}</table>`
+  : "<p class='muted'>No closures found in the sheet. Add rows to the Closures tab to block specific dates.</p>"
+}`;
+
+    res.type("html").send(renderPage({ title: "Shop Closures", active: "closures", token, body, flash: adminFlash(req) }));
+  } catch (err) {
+    res.type("html").send(
+      renderPage({ title: "Shop Closures", active: "closures", token, body: `<p>Could not load closures: ${escapeHtml(err.message)}</p>` })
     );
   }
 });
@@ -3868,11 +3927,15 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         userText,
         getActiveTenant()
       );
+      const closuresNote = await buildClosuresSystemNote().catch(() => "");
       const systemMessages = [
         { role: "system", content: getSystemRulesForTenant(tenant) },
         { role: "system", content: getSupportHoursSystemNote() },
         { role: "system", content: getReplyLanguageInstruction(senderId) },
       ];
+      if (closuresNote) {
+        systemMessages.push({ role: "system", content: closuresNote });
+      }
       if (isRecommendationsEnabled(tenant) || isTenantFeatureEnabled("quotes", tenant)) {
         systemMessages.push({ role: "system", content: getInventorySystemNote() });
       }
