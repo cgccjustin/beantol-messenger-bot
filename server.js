@@ -245,38 +245,11 @@ const deliveryAlertCooldowns = new Map();
 const deliveryAgentOfferPending = new Map();
 const DELIVERY_AGENT_OFFER_TTL_MS = 48 * 60 * 60 * 1000;
 
-const CHAT_HISTORY_MAX_MESSAGES = Number(
-  process.env.CHAT_HISTORY_MAX_MESSAGES || 20
-);
-const CHAT_HISTORY_TTL_MS =
-  Number(process.env.CHAT_HISTORY_TTL_HOURS || 24) * 60 * 60 * 1000;
-
-/** @type {Map<string, { messages: { role: "user" | "assistant"; content: string }[]; updatedAt: number }>} */
-const chatHistories = new Map();
-
-function getChatHistory(senderId) {
-  const entry = chatHistories.get(scopeKey(senderId));
-  if (!entry) return [];
-  if (Date.now() - entry.updatedAt > CHAT_HISTORY_TTL_MS) {
-    chatHistories.delete(scopeKey(senderId));
-    return [];
-  }
-  return entry.messages;
-}
-
-function appendChatHistory(senderId, userText, assistantReply) {
-  let entry = chatHistories.get(scopeKey(senderId));
-  if (!entry) {
-    entry = { messages: [], updatedAt: Date.now() };
-  }
-  entry.messages.push({ role: "user", content: userText });
-  entry.messages.push({ role: "assistant", content: assistantReply });
-  if (entry.messages.length > CHAT_HISTORY_MAX_MESSAGES) {
-    entry.messages = entry.messages.slice(-CHAT_HISTORY_MAX_MESSAGES);
-  }
-  entry.updatedAt = Date.now();
-  chatHistories.set(scopeKey(senderId), entry);
-}
+const {
+  prewarmHistory,
+  getChatHistory,
+  appendChatHistory,
+} = require("./lib/chat-history-store");
 
 function getSupportLocalHour() {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -3639,6 +3612,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     );
     return;
   }
+
+  // Warm chat history from Google Sheet on first message from this sender this server lifetime.
+  await prewarmHistory(senderId).catch(() => {});
 
   const profileName = await resolveCustomerDisplayName(senderId, platform);
   const tenant = getActiveTenant();
