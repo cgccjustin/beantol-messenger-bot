@@ -264,6 +264,9 @@ A: Yes — pickup at our shop, you arrange your own courier, or we help via J&T 
 Q: Do you deliver outside Cebu? / To Manila / other provinces / nationwide?
 A: Yes. Maxim is Cebu-area only. Outside Cebu we ship via J&T or a courier you prefer. Delivery time and cost depend on your location — leave your name, mobile, full address (city/province), and order details; a Beantol representative will follow up. You can keep messaging here with questions while you wait.
 
+Q: Do you sell coffee machines? / French press? / grinders? / brewing equipment?
+A: No — Beantol sells roasted coffee beans only. We do not sell espresso machines, French presses, grinders, kettles, or other brewing equipment. Tell us how you brew at home and we can recommend the right beans.
+
 
 Pricing
 

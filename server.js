@@ -156,6 +156,11 @@ const {
 } = require("./lib/outside-cebu-delivery");
 const { resolveCebuAreaDeliveryTurn, isCebuAreaDeliveryInquiry, getCebuDeliverySystemNote } = require("./lib/cebu-area-delivery");
 const {
+  isEquipmentSalesInquiry,
+  getEquipmentSalesSystemNote,
+  resolveEquipmentSalesTurn,
+} = require("./lib/equipment-inquiry");
+const {
   createWelcomeState,
   applyWelcomeToReply,
   welcomeOnlyReply,
@@ -3788,6 +3793,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
+  const equipmentSales = resolveEquipmentSalesTurn(userText);
+  if (equipmentSales.handled) {
+    await deliverCustomerReply(senderId, userText, platform, equipmentSales.reply, welcomeState);
+    return;
+  }
+
   if (isCebuDeliveryZonesEnabled()) {
     if (
       isOutsideCebuAgentOfferPending(senderId) &&
@@ -3943,6 +3954,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
             content: getCebuDeliverySystemNote(),
           });
         }
+      }
+      if (isEquipmentSalesInquiry(userText)) {
+        systemMessages.push({
+          role: "system",
+          content: getEquipmentSalesSystemNote(),
+        });
       }
       if (hasImageAttachment && paymentResolution.action === "none") {
         systemMessages.push({
