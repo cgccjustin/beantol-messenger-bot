@@ -2697,6 +2697,8 @@ ${rows ? `<table><tr><th>Quote ID</th><th>Created</th><th>Name</th><th>Items</th
 app.get("/admin/inventory/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const token = adminToken(req);
+  const tenantParam = req.query.tenant ? String(req.query.tenant) : "";
+  const multiTenant = listTenants().length > 1;
   let sheetItems = [];
   let loadError = "";
   let invMeta = {};
@@ -2704,7 +2706,9 @@ app.get("/admin/inventory/view", async (req, res) => {
   let labels = [];
   let unknown = [];
 
-  if (isInventorySheetConfigured()) {
+  if (multiTenant && !tenantParam) {
+    loadError = "";
+  } else if (isInventorySheetConfigured()) {
     try {
       const inv = await runAdminWithTenant(req, () =>
         req.query.refresh === "1" ? refreshInventoryCache() : listInventory()
@@ -2729,13 +2733,13 @@ app.get("/admin/inventory/view", async (req, res) => {
     ({ labels, unknown, source } = parseUnavailableProductLabels());
   }
 
-  let body = renderTenantSwitcher(token, invMeta.tenantId || req.query.tenant, listTenants());
+  let body = renderTenantSwitcher(token, invMeta.tenantId || tenantParam, listTenants());
 
-  if (listTenants().length > 1 && !req.query.tenant) {
-    body +=
-      `<div class="alert-warn"><strong>Multi-tenant:</strong> Pick a shop above. Without <code>?tenant=…</code> this page defaults to <strong>${escapeHtml(getDefaultTenant()?.name || "Beantol")}</strong> — not Offbeat Brew.</div>`;
+  if (multiTenant && !tenantParam) {
+    body += `<div class="alert-warn"><strong>Select a shop above</strong> to view inventory. Each tenant has its own Google Sheet — opening Inventory without a shop shows nothing on purpose (avoids mixing Beantol and Offbeat).</div>`;
   }
 
+  if (tenantParam || !multiTenant) {
   if (isInventorySheetConfigured()) {
     const tenantHint = invMeta.tenantId
       ? ` · tenant <strong>${escapeHtml(invMeta.tenantId)}</strong>`
@@ -2789,10 +2793,11 @@ app.get("/admin/inventory/view", async (req, res) => {
     body += `<p class="muted">Sheet inventory not configured. Using <code>UNAVAILABLE_PRODUCTS</code> on Render.</p>
 <p><strong>Out of stock:</strong> ${labels.length ? escapeHtml(labels.join(", ")) : "(none)"}</p>
 ${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.join(", "))}</p>` : ""}
-<p class="muted">To enable live inventory: add an <strong>Inventory</strong> tab to your Sheet (auto-seeded on first load). Same <code>GOOGLE_LEADS_SHEET_ID</code>.</p>`;
+<p class="muted">To enable live inventory: add an <strong>Inventory</strong> tab to your Sheet. Café tenants: use <strong>Reseed from catalog</strong> once after setup.</p>`;
+  }
   }
 
-  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">JSON API</a>${isInventorySheetConfigured() ? ` · <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">Force refresh</a>` : ""}${isInventorySheetConfigured() && invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` · <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId)}" onclick="return confirm('Replace all Inventory rows with this tenant\\'s menu products?')">Reseed from catalog</a>` : ""}</p>`;
+  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : tenantParam ? `&tenant=${encodeURIComponent(tenantParam)}` : ""}">JSON API</a>${isInventorySheetConfigured() && (tenantParam || !multiTenant) ? ` · <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : tenantParam ? `&tenant=${encodeURIComponent(tenantParam)}` : ""}">Force refresh</a>` : ""}${isInventorySheetConfigured() && invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` · <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId)}" onclick="return confirm('Replace all Inventory rows with this tenant\\'s menu products?')">Reseed from catalog</a>` : ""}</p>`;
 
   res.type("html").send(
     renderPage({
@@ -2802,7 +2807,7 @@ ${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.joi
       body,
       flash: adminFlash(req),
       req,
-      tenantId: invMeta.tenantId || req.query.tenant,
+      tenantId: invMeta.tenantId || tenantParam,
     })
   );
 });
@@ -2811,6 +2816,11 @@ app.get("/admin/inventory/reseed", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const token = adminToken(req);
   const tenantQ = req.query.tenant ? `&tenant=${encodeURIComponent(req.query.tenant)}` : "";
+  if (listTenants().length > 1 && !req.query.tenant) {
+    return res.redirect(
+      `/admin/inventory/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent("Select a shop (?tenant=offbeat-brew) before reseed")}`
+    );
+  }
   try {
     const result = await runAdminWithTenant(req, () => reseedInventoryFromCatalog());
     if (result?.skipped) {
