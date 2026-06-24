@@ -5,6 +5,7 @@
 
 require("dotenv").config();
 const express = require("express");
+const https = require("https");
 const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote, buildNonWholesaleBulkSystemNote } = require("./lib/pricing");
@@ -591,8 +592,22 @@ function buildFilterRoastOnlySizeNote(senderId, userText) {
   );
 }
 
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 90000);
+const OPENAI_REQUEST_RETRIES = Math.max(1, Number(process.env.OPENAI_REQUEST_RETRIES || 4));
+
+const openaiHttpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  timeout: OPENAI_TIMEOUT_MS,
+});
+
 const openai = OPENAI_API_KEY
-  ? new OpenAI({ apiKey: OPENAI_API_KEY })
+  ? new OpenAI({
+      apiKey: OPENAI_API_KEY,
+      maxRetries: 2,
+      timeout: OPENAI_TIMEOUT_MS,
+      httpAgent: openaiHttpsAgent,
+    })
   : null;
 
 function shouldSyncGoogleDocsOnStartup() {
@@ -3583,12 +3598,42 @@ function buildMinimalFallbackChatMessages(tenant, userText) {
   ];
 }
 
+function isTransientOpenAiError(err) {
+  const msg = String(err?.message || err?.cause?.message || "").toLowerCase();
+  const code = String(err?.code || err?.cause?.code || err?.status || "");
+  return (
+    /premature close|econnreset|etimedout|socket hang up|fetch failed|network|timeout|aborted/i.test(
+      msg
+    ) ||
+    /ERR_STREAM_PREMATURE_CLOSE|ECONNRESET|ETIMEDOUT|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT/i.test(
+      code
+    )
+  );
+}
+
 async function requestOpenAiChatCompletion(messages) {
-  return openai.chat.completions.create({
-    model: OPENAI_MODEL,
-    messages,
-    max_tokens: 500,
-  });
+  let lastErr;
+  for (let attempt = 0; attempt < OPENAI_REQUEST_RETRIES; attempt++) {
+    try {
+      return await openai.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages,
+        max_tokens: 500,
+      });
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientOpenAiError(err) || attempt >= OPENAI_REQUEST_RETRIES - 1) {
+        throw err;
+      }
+      const delayMs = 600 * 2 ** attempt;
+      console.warn(
+        `OpenAI transient error (attempt ${attempt + 1}/${OPENAI_REQUEST_RETRIES}), retry in ${delayMs}ms:`,
+        err.message
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
 }
 
 async function handleMessage(senderId, userText, platform = "messenger", messageContext = {}) {
