@@ -92,6 +92,7 @@ const {
   ensureInventoryLoaded,
   updateProductFields,
   getCachedUnavailableLabels,
+  getCachedInventoryItems,
   getCachedLowStockLabels,
   getLowStockThreshold,
   VALID_STATUSES,
