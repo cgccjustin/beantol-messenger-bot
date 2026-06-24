@@ -69,7 +69,7 @@ Handoff resolve with multiple tenants: add `?tenant=beantol` when needed.
 
 ## Plug-and-play checklist for a new café client
 
-See **`docs/KAPE-KRISTIANO-SETUP.md`** for a full step-by-step (Beantol stays live on Render until you set `TENANTS_JSON`).
+See **`docs/KAPE-KRISTIANO-SETUP.md`** or **`docs/OFFBEAT-BREW-SETUP.md`** for full step-by-step (Beantol stays live on Render until you set `TENANTS_JSON`).
 
 1. Copy `config/tenants.example.json` → add new tenant (set `enabled: true` only when ready)  
 2. Write their FAQ/prices in a new Google Doc  

@@ -33,3 +33,4 @@ Create `profiles/bakery.md` and set `"rules": { "profile": "bakery" }` on the te
 - `profiles/cafe.md` — café / restaurant assistant
 - `profiles/beantol.md` — not used (Beantol uses `system-rules.js` directly)
 - `tenants/kape-kristiano.md` — Kape Kristiano overrides
+- `tenants/offbeat-brew.md` — OFFBEAT BREW overrides

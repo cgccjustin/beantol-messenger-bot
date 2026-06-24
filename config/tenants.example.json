@@ -98,6 +98,55 @@
         "profile": "cafe",
         "extra": ""
       }
+    },
+    {
+      "id": "offbeat-brew",
+      "name": "OFFBEAT BREW",
+      "enabled": false,
+      "_comment_enabled": "Set enabled: true only after Page token, Google Doc/Sheet, and Meta webhook are ready. See docs/OFFBEAT-BREW-SETUP.md",
+      "meta": {
+        "pageId": "YOUR_OFFBEAT_BREW_PAGE_NUMERIC_ID",
+        "pageAccessToken": "YOUR_OFFBEAT_BREW_PAGE_ACCESS_TOKEN",
+        "instagramAccountId": "",
+        "instagramUsername": ""
+      },
+      "google": {
+        "knowledgeDocIds": "YOUR_OFFBEAT_DOC_ID:offbeat-brew-knowledge",
+        "leadsSheetId": "YOUR_OFFBEAT_SHEET_ID",
+        "leadsSheetTab": "Leads",
+        "ordersSheetTab": "Orders",
+        "quotesSheetTab": "Quotes",
+        "appointmentsSheetTab": "Appointments",
+        "inventorySheetTab": "Inventory",
+        "eventsSheetTab": "Events"
+      },
+      "notify": {
+        "handoffEmail": "your-alerts@example.com",
+        "leadEmail": "your-alerts@example.com",
+        "orderEmail": "your-alerts@example.com"
+      },
+      "shop": {
+        "address": "YOUR_OFFBEAT_SHOP_ADDRESS",
+        "hours": "YOUR_OFFBEAT_SHOP_HOURS e.g. Monday–Saturday, 8:00 AM–8:00 PM"
+      },
+      "branding": {
+        "businessName": "OFFBEAT BREW",
+        "handoffReply": "",
+        "botResumeReply": "",
+        "handoffCatchUpApology": ""
+      },
+      "features": {
+        "appointments": false,
+        "quotes": false,
+        "recommendations": false,
+        "cebuDeliveryZones": false,
+        "leadCapture": true,
+        "orderCapture": true
+      },
+      "rules": {
+        "profile": "cafe",
+        "extra": ""
+      }
     }
   ]
 }

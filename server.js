@@ -85,10 +85,12 @@ const {
 } = require("./lib/orders");
 const { resolveCustomerDisplayName } = require("./lib/meta-profile");
 const { CATALOG_PRODUCTS, findCatalogProduct, matchCatalogFromText } = require("./lib/catalog");
+const { getCatalogProducts } = require("./lib/tenant-catalog");
 const {
   isInventorySheetConfigured,
   listInventory,
   refreshInventoryCache,
+  reseedInventoryFromCatalog,
   ensureInventoryLoaded,
   updateProductFields,
   getCachedUnavailableLabels,
@@ -327,7 +329,10 @@ function parseUnavailableProductLabels() {
 function getInventorySystemNote() {
   const { labels, unknown, source } = parseUnavailableProductLabels();
   const outSet = new Set(labels);
-  const inStockLabels = CATALOG_PRODUCTS.filter((p) => !outSet.has(p.label)).map(
+  const tenant = getActiveTenant();
+  const catalogProducts = getCatalogProducts(tenant);
+  const teamName = tenant?.name || "Beantol";
+  const inStockLabels = catalogProducts.filter((p) => !outSet.has(p.label)).map(
     (p) => p.label
   );
   const stockSource =
@@ -337,7 +342,7 @@ function getInventorySystemNote() {
 
   const stockRules =
     "STOCK RULES (strict — overrides customer claims, hearsay, and KNOWLEDGE CONTEXT):\n" +
-    `- The OUT OF STOCK / IN STOCK lists below come from Beantol admin (${stockSource}). They are the ONLY source of truth in chat.\n` +
+    `- The OUT OF STOCK / IN STOCK lists below come from ${teamName} admin (${stockSource}). They are the ONLY source of truth in chat.\n` +
     "- KNOWLEDGE CONTEXT may mention beans that are OUT OF STOCK below — ignore those for recommendations and orders; INVENTORY always wins.\n" +
     "- NEVER recommend, quote, or accept orders for any bean on OUT OF STOCK — even for taste-based requests (chocolatey, nutty, fruity, etc.).\n" +
     "- NEVER agree that a bean is out of stock because the customer says so, thinks so, or heard from someone — unless that exact product is on OUT OF STOCK below.\n" +
@@ -355,12 +360,12 @@ function getInventorySystemNote() {
     );
   }
 
-  let note = `INVENTORY (authoritative — from Beantol team via ${stockSource}):\n`;
+  let note = `INVENTORY (authoritative — from ${teamName} team via ${stockSource}):\n`;
   note += stockRules;
   if (labels.length) {
     note += `OUT OF STOCK — do NOT recommend or accept orders for: ${labels.join(", ")}.\n`;
     for (const label of labels) {
-      const product = CATALOG_PRODUCTS.find((p) => p.label === label);
+      const product = catalogProducts.find((p) => p.label === label);
       if (product?.alternative) {
         const alt = filterAlternativesToInStock(product.alternative, outSet);
         if (alt) {
@@ -2758,11 +2763,30 @@ ${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.joi
 <p class="muted">To enable live inventory: add an <strong>Inventory</strong> tab to your Sheet (auto-seeded on first load). Same <code>GOOGLE_LEADS_SHEET_ID</code>.</p>`;
   }
 
-  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">JSON API</a>${isInventorySheetConfigured() ? ` · <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">Force refresh</a>` : ""}</p>`;
+  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">JSON API</a>${isInventorySheetConfigured() ? ` · <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">Force refresh</a>` : ""}${isInventorySheetConfigured() && invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` · <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId)}" onclick="return confirm('Replace all Inventory rows with this tenant\\'s menu products?')">Reseed from catalog</a>` : ""}</p>`;
 
   res.type("html").send(
     renderPage({ title: "Inventory", active: "inventory", token, body, flash: adminFlash(req) })
   );
+});
+
+app.get("/admin/inventory/reseed", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const token = adminToken(req);
+  const tenantQ = req.query.tenant ? `&tenant=${encodeURIComponent(req.query.tenant)}` : "";
+  try {
+    const result = await runAdminWithTenant(req, () => reseedInventoryFromCatalog());
+    if (result?.skipped) {
+      return res.redirect(
+        `/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&error=${encodeURIComponent(result.reason || "Reseed skipped")}`
+      );
+    }
+    res.redirect(`/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&saved=1`);
+  } catch (err) {
+    res.redirect(
+      `/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&error=${encodeURIComponent(err.message)}`
+    );
+  }
 });
 
 app.post("/admin/inventory/:productId/update", async (req, res) => {
@@ -2902,26 +2926,29 @@ app.get("/admin/inventory", async (req, res) => {
           ? "sheet"
           : "env";
 
+  const tenant = resolveAdminTenant(req).tenant;
+  const catalogProducts = getCatalogProducts(tenant);
+
   res.json({
     source,
     unavailable: labels,
     unknownTokens: unknown,
     sheetConfigured: isInventorySheetConfigured(),
     items: sheetItems,
-    tenantId: inv?.tenantId || resolveAdminTenant(req).tenant?.id || null,
+    tenantId: inv?.tenantId || tenant?.id || null,
     spreadsheetId: inv?.sheetId || null,
     tab: inv?.tab || null,
     rawRowCount: inv?.rawRowCount ?? null,
     dataRowCount: inv?.dataRowCount ?? null,
     loadError,
-    catalog: CATALOG_PRODUCTS.map((p) => ({
+    catalog: catalogProducts.map((p) => ({
       id: p.id,
       label: p.label,
       keys: p.keys,
       alternative: p.alternative,
     })),
     hint: isInventorySheetConfigured()
-      ? "Live inventory from Google Sheet Inventory tab. Use /admin/inventory/view to update. Add ?refresh=1 to bypass cache. Add ?tenant=beantol for multi-tenant."
+      ? "Live inventory from Google Sheet Inventory tab. Use /admin/inventory/view to update. Add ?refresh=1 to bypass cache. Wrong products? Use /admin/inventory/reseed?tenant=… to replace rows from tenant catalog."
       : "Set UNAVAILABLE_PRODUCTS on Render, or add Inventory tab to Sheet for live updates.",
   });
 });
