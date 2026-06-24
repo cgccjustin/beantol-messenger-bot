@@ -18,16 +18,16 @@ Example: We serve specialty coffee and [food/snacks] in [area]. [What makes you 
 
 Location & Hours
 
-Address: [0259 Canaway, Tibanga, Iligan City, Philippines, 9200 (landmark: at the back of INC church) ]
+Address: 0259 Canaway, Tibanga, Iligan City, Philippines, 9200 (landmark: at the back of INC church)
 
-Shop hours: [e.g. Monday–Saturday, 8:00 AM–8:00 PM. Closed Sundays.]
+Shop hours: Monday–Saturday, 9:00 AM–6:00 PM. Closed Sundays.
 
 Live chat support (Messenger / Instagram): Human agents are available daily from 9:00 AM to 9:00 PM Philippine time.
 
 
 How to Order
 
-• Pickup: Visit the shop during shop hours (see above).
+• Pickup: Visit the shop Monday–Saturday, 9:00 AM–6:00 PM.
 • Messenger / Instagram: Message us here for pickup or delivery orders.
 • Delivery: [DESCRIBE — e.g. Maxim for Iligan City only, or pickup only, or GrabFood, etc.]
 • Delivery outside your area: [pickup only / not available — be explicit]
@@ -134,7 +134,10 @@ After paying (for delivery or prepaid orders), send proof of payment in the chat
 Ordering & delivery FAQ
 
 Q: How can I order? / Pickup?
-A: [Short answer — shop hours, Messenger/IG, pickup address]
+A: Message us here on Messenger/Instagram, or visit for pickup Monday–Saturday, 9:00 AM–6:00 PM at 0259 Canaway, Tibanga, Iligan City (landmark: at the back of INC church).
+
+Q: Are you open today? / What are your hours? / Open on Sunday?
+A: Shop hours are Monday to Saturday, 9:00 AM to 6:00 PM. Closed Sundays. Live chat support (human agents) is daily 9:00 AM–9:00 PM.
 
 Q: Do you deliver?
 A: [Exact zones and method — match Delivery section above]
@@ -152,8 +155,8 @@ A: She is an aspiring coffee shop owner.
 
 Pickup
 
-• Address: [Same as Location above]
-• Hours: [Same as shop hours]
+• Address: 0259 Canaway, Tibanga, Iligan City, Philippines, 9200 (landmark: at the back of INC church)
+• Hours: Monday–Saturday, 9:00 AM–6:00 PM. Closed Sundays.
 
 
 Reservations & seating
