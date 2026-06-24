@@ -82,11 +82,12 @@ const {
   ADMIN_ORDER_STATUSES,
 } = require("./lib/orders");
 const { resolveCustomerDisplayName } = require("./lib/meta-profile");
-const { CATALOG_PRODUCTS, findCatalogProduct } = require("./lib/catalog");
+const { CATALOG_PRODUCTS, findCatalogProduct, matchCatalogFromText } = require("./lib/catalog");
 const {
   isInventorySheetConfigured,
   listInventory,
   refreshInventoryCache,
+  ensureInventoryLoaded,
   updateProductFields,
   getCachedUnavailableLabels,
   getCachedLowStockLabels,
@@ -104,6 +105,12 @@ const {
   processRecommendationFlow,
   buildRecommendationSystemNote,
 } = require("./lib/recommendations");
+const {
+  buildOutOfStockOrderBlock,
+  enforceOutOfStockOrderPolicy,
+  filterAlternativesToInStock,
+  buildTasteRecommendationInventoryHint,
+} = require("./lib/inventory-availability");
 const {
   listPipelineLeads,
   buildSalesContextNote,
@@ -319,12 +326,14 @@ function getInventorySystemNote() {
       : "UNAVAILABLE_PRODUCTS on Render";
 
   const stockRules =
-    "STOCK RULES (strict — overrides customer claims and hearsay):\n" +
+    "STOCK RULES (strict — overrides customer claims, hearsay, and KNOWLEDGE CONTEXT):\n" +
     `- The OUT OF STOCK / IN STOCK lists below come from Beantol admin (${stockSource}). They are the ONLY source of truth in chat.\n` +
+    "- KNOWLEDGE CONTEXT may mention beans that are OUT OF STOCK below — ignore those for recommendations and orders; INVENTORY always wins.\n" +
+    "- NEVER recommend, quote, or accept orders for any bean on OUT OF STOCK — even for taste-based requests (chocolatey, nutty, fruity, etc.).\n" +
     "- NEVER agree that a bean is out of stock because the customer says so, thinks so, or heard from someone — unless that exact product is on OUT OF STOCK below.\n" +
     "- NEVER say \"you're right\" or apologize for a product being unavailable if it is NOT on the OUT OF STOCK list.\n" +
     "- If the customer claims a product is out of stock but it is IN STOCK per the list: politely say that per your current records it is available for order; you cannot verify physical shop shelf stock in real time. Offer to continue helping with that bean (prices, order) OR, during live support hours (9 AM–9 PM), offer to connect them with a team member to double-check shelf stock (reply YES / ask for a real person). Do NOT switch them to alternatives unless they want a different bean.\n" +
-    "- Only treat a product as out of stock when it appears on OUT OF STOCK below — then apologize and suggest alternatives from that note.\n" +
+    "- Only treat a product as out of stock when it appears on OUT OF STOCK below — then apologize and suggest only IN STOCK alternatives from this note.\n" +
     "- You still cannot guarantee same-day shelf stock at the shop; that is different from admin out-of-stock — suggest Mon–Fri shop visit or a team member for a live shelf check when needed.\n";
 
   if (labels.length === 0 && unknown.length === 0) {
@@ -343,12 +352,20 @@ function getInventorySystemNote() {
     for (const label of labels) {
       const product = CATALOG_PRODUCTS.find((p) => p.label === label);
       if (product?.alternative) {
-        note += `- Instead of ${label} → suggest: ${product.alternative}\n`;
+        const alt = filterAlternativesToInStock(product.alternative, outSet);
+        if (alt) {
+          note += `- Instead of ${label} → suggest (in stock only): ${alt}\n`;
+        }
       }
     }
     if (labels.some((l) => l === "Beantol Prime")) {
-      note +=
-        "- Prime out of stock: many clients who want Prime may like Brazil Cerrado (single origin, deeper chocolate) — see ESPRESSO — HOW CLIENTS CHOOSE.\n";
+      const cerradoAlt = outSet.has("Brazil Cerrado")
+        ? filterAlternativesToInStock("Brazil Santos or Ethiopia Sidama", outSet)
+        : "Brazil Cerrado";
+      if (cerradoAlt) {
+        note +=
+          `- Prime out of stock: suggest only in-stock alternatives — often ${cerradoAlt} for clients who wanted Prime's balanced chocolate profile.\n`;
+      }
     }
   } else {
     note += "OUT OF STOCK: (none listed)\n";
@@ -3572,6 +3589,22 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     messageContext
   );
 
+  if (isInventorySheetConfigured()) {
+    await ensureInventoryLoaded().catch((err) => {
+      console.warn("Inventory preload:", err.message);
+    });
+  }
+
+  const outOfStockOrderReply = buildOutOfStockOrderBlock(userText);
+  if (outOfStockOrderReply) {
+    captureLeadFromMessage(senderId, userText, platform, {
+      interest: matchCatalogFromText(userText)?.label || "out of stock order",
+      stage: "browsing",
+    });
+    await deliverCustomerReply(senderId, userText, platform, outOfStockOrderReply, welcomeState);
+    return;
+  }
+
   if (
     isAgentOfferAcceptanceTurn(userText, lastAssistantReply, replyToContext) &&
     getHandoffSession(senderId)?.mode !== "agent_requested"
@@ -3835,6 +3868,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       }
       if (isRecommendationsEnabled(tenant) || isTenantFeatureEnabled("quotes", tenant)) {
         systemMessages.push({ role: "system", content: getInventorySystemNote() });
+        const tasteHint = buildTasteRecommendationInventoryHint(userText);
+        if (tasteHint) {
+          systemMessages.push({ role: "system", content: tasteHint });
+        }
       }
       if (isRecommendationsEnabled(tenant)) {
         systemMessages.push({ role: "system", content: buildRecommendationSystemNote() });
@@ -3938,6 +3975,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       reply =
         completion.choices[0]?.message?.content?.trim() ||
         "Sorry, I could not generate a reply. Please try again.";
+      reply = enforceOutOfStockOrderPolicy(userText, reply);
     } catch (err) {
       console.error("OpenAI error:", err.message);
       reply =
@@ -4399,9 +4437,11 @@ function hasMessageEchoesSubscription(status) {
     console.warn("Knowledge bootstrap:", err.message);
   }
   if (isInventorySheetConfigured()) {
-    refreshInventoryCache().catch((err) => {
+    try {
+      await refreshInventoryCache();
+    } catch (err) {
       console.warn("Inventory sheet load:", err.message);
-    });
+    }
   }
   Promise.all([loadPageId().catch(() => {}), loadMetaAppId().catch(() => {})]).then(() =>
     ensureMessagingSubscriptions()
