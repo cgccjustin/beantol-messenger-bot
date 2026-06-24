@@ -29,25 +29,33 @@ How to Order
 
 • Pickup: Visit the shop Monday–Saturday, 9:00 AM–6:00 PM.
 • Messenger / Instagram: Message us here for pickup or delivery orders.
-• Delivery: [DESCRIBE — e.g. Maxim for Iligan City only, or pickup only, or GrabFood, etc.]
-• Delivery outside your area: [pickup only / not available — be explicit]
+• Delivery: Yes — via Maxim or Grab (Iligan City area). Delivery/rider fee is shouldered by the customer (separate from the drink order).
+• Delivery outside Iligan City: Contact us — we may not be able to deliver; pickup at the shop is always an option.
 
 
 Delivery
 
-[Copy and edit one of these patterns — delete what does not apply.]
+We offer delivery — we do NOT say pickup only.
 
-Option A — Maxim (Iligan City):
-• Maxim delivery for Iligan City only.
-• Customer pays the Maxim rider fee separately from the order.
-• We need: complete address, contact name, mobile number.
-• Payment must be settled first — send proof of payment in this chat.
+• Couriers: Maxim or Grab (Iligan City area).
+• Delivery fee: Shouldered by the customer — rider fee is separate from the drink order total.
+• To arrange delivery we need: complete delivery address, contact name, and mobile number.
+• Payment: Order must be paid first — send proof of payment in this chat before we dispatch.
+• Pickup is also available at the shop during shop hours (Mon–Sat, 9 AM–6 PM).
 
-Option B — Pickup only:
-• We do not offer delivery. Pickup at the shop during shop hours.
+Delivery FAQ — shop OPEN (Mon–Sat, 9 AM–6 PM):
+Q: Do you deliver? / Can you deliver? / Delivery available?
+A: Yes! We deliver via Maxim or Grab in the Iligan City area. The delivery/rider fee is shouldered by the customer (separate from your drink order). Send us your complete address, contact name, and mobile number, and pay for your order first — then we'll arrange dispatch.
 
-Option C — Other courier:
-• [Describe J&T, Lalamove, etc. if you offer it.]
+Delivery FAQ — shop CLOSED (outside hours or Sunday):
+Q: Do you deliver? / Can you deliver? (asked while we are closed)
+A: Yes, we deliver via Maxim or Grab — but we're closed right now (shop hours: Monday–Saturday, 9:00 AM–6:00 PM; closed Sundays). We can arrange your delivery first thing when we're open. Tell us what you'd like to order and your delivery details, or message us again during shop hours and we'll get it sorted.
+
+Q: Do you deliver to [far town / outside Iligan]?
+A: Delivery is mainly via Maxim or Grab for Iligan City. For areas outside Iligan, message us with your location — we may offer pickup at the shop instead.
+
+Q: Do you deliver outside Iligan / nationwide?
+A: We focus on Iligan City via Maxim or Grab. For other areas, pickup at the shop or contact us to check options.
 
 
 Menu & Prices
@@ -169,14 +177,14 @@ A: Message us here on Messenger/Instagram, or visit for pickup Monday–Saturday
 Q: Are you open today? / What are your hours? / Open on Sunday?
 A: Shop hours are Monday to Saturday, 9:00 AM to 6:00 PM. Closed Sundays. Live chat support (human agents) is daily 9:00 AM–9:00 PM.
 
-Q: Do you deliver?
-A: [Exact zones and method — match Delivery section above]
+Q: Do you deliver? / Can you deliver? / Delivery available?
+A: Yes — we deliver via Maxim or Grab in the Iligan City area. The delivery/rider fee is shouldered by the customer (separate from your drink order). We need your complete address, contact name, and mobile number; pay for your order first and send proof in chat. If we are closed when you ask (outside Mon–Sat 9 AM–6 PM or on Sunday), still say yes we deliver — but we're closed right now and can arrange delivery first thing when we open.
 
 Q: Do you deliver to [far town / outside province]?
-A: [Pickup only / not available — be explicit]
+A: Delivery is mainly for Iligan City via Maxim or Grab. For other areas, message us with your location — pickup at the shop may be the best option.
 
 Q: Do you deliver outside Iligan/ nationwide?
-A: [ No — pickup only]
+A: We focus on Iligan City via Maxim or Grab. For other areas, pickup at the shop or contact us to check.
 
 
 Fun Facts
