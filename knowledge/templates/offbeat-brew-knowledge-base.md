@@ -129,7 +129,10 @@ Q: Are your drinks espresso-based? / Do you use espresso?
 A: No. Our Coffee Series drinks (Offbeat Black, Offbeat White, Offbeat Mocha, Offbeat Dulce) are made from our signature cold brew concentrate — cold brew based, not espresso based.
 
 Q: What beans do you use? / What coffee beans are in your drinks?
-A: We use quality, specially curated Arabica beans for our recipes.
+A: We use quality, specially curated Arabica beans for our recipes — our beans come from Beantol Roastery. If you have questions about the beans themselves (origins, roasts, etc.), message Beantol Roastery on Facebook Messenger and their team can help.
+
+Q: Can I buy beans? / Do you sell coffee beans? / Order roasted beans / Take-home beans
+A: Offbeat Brew is ready-to-drink menu drinks — we don't sell retail bags of roasted beans here. For bean orders and inquiries, message Beantol Roastery on Facebook Messenger.
 
 Q: What sweetener do you use? / What's in your milk mixture? / Recipe / ingredients (proprietary)
 A: That's proprietary information we're not able to share publicly — we appreciate your curiosity! We're happy to help with our menu, what's in each drink at a high level (see drink descriptions above), orders, and pickup or delivery.
