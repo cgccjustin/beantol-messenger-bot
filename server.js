@@ -37,6 +37,7 @@ const {
   loadTenantRegistry,
   listTenants,
   getTenantById,
+  getDefaultTenant,
   getTenantRegistry,
   resolveTenantForWebhook,
   registerTenantPageId,
@@ -113,6 +114,7 @@ const {
   filterAlternativesToInStock,
   buildTasteRecommendationInventoryHint,
   buildOutOfStockProductSystemHint,
+  getUnavailableLabels,
 } = require("./lib/inventory-availability");
 const { requestChatCompletion, isTransientError } = require("./lib/openai-chat");
 const {
@@ -312,8 +314,10 @@ function parseEnvUnavailableProductLabels() {
 
 function parseUnavailableProductLabels() {
   if (isInventorySheetConfigured()) {
-    const labels = getCachedUnavailableLabels();
-    return { labels, unknown: [], source: "sheet" };
+    const labels = getUnavailableLabels();
+    const items = getCachedInventoryItems();
+    const source = items.length ? "sheet" : labels.length ? "env_fallback" : "sheet";
+    return { labels, unknown: [], source };
   }
   const env = parseEnvUnavailableProductLabels();
   return { ...env, source: "env" };
@@ -1762,6 +1766,22 @@ function requireAdmin(req, res) {
   return true;
 }
 
+function resolveAdminTenant(req) {
+  const tenantId = req.query.tenant ? String(req.query.tenant) : "";
+  if (tenantId) {
+    const tenant = getTenantById(tenantId);
+    if (!tenant) return { error: `Unknown tenant: ${tenantId}` };
+    return { tenant };
+  }
+  return { tenant: getDefaultTenant() };
+}
+
+async function runAdminWithTenant(req, fn) {
+  const resolved = resolveAdminTenant(req);
+  if (resolved.error) throw new Error(resolved.error);
+  return runWithTenant(resolved.tenant, fn);
+}
+
 function getPublicBaseUrl(req) {
   if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
   if (!req) return "";
@@ -2651,34 +2671,63 @@ ${rows ? `<table><tr><th>Quote ID</th><th>Created</th><th>Name</th><th>Items</th
 app.get("/admin/inventory/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const token = adminToken(req);
-
-  const { labels, unknown, source } = parseUnavailableProductLabels();
   let sheetItems = [];
+  let loadError = "";
+  let invMeta = {};
+  let source = "env";
+  let labels = [];
+  let unknown = [];
+
   if (isInventorySheetConfigured()) {
     try {
-      const inv = await listInventory();
+      const inv = await runAdminWithTenant(req, () =>
+        req.query.refresh === "1" ? refreshInventoryCache() : listInventory()
+      );
       sheetItems = inv.items || [];
+      invMeta = {
+        tab: inv.tab,
+        sheetId: inv.sheetId,
+        tenantId: inv.tenantId,
+        rawRowCount: inv.rawRowCount,
+        parseError: inv.parseError,
+      };
+      labels = inv.unavailable || [];
+      source = "sheet";
+      if (inv.parseError) loadError = inv.parseError;
     } catch (err) {
+      loadError = err.message;
       sheetItems = [];
     }
+  } else {
+    ({ labels, unknown, source } = parseUnavailableProductLabels());
   }
 
   let body;
-  if (isInventorySheetConfigured() && sheetItems.length) {
-    const rows = sheetItems
-      .map((item) => {
-        const rowClass =
-          item.status === "out_of_stock"
-            ? "status-out"
-            : item.status === "low"
-              ? "status-low"
-              : "";
-        const action = `/admin/inventory/${encodeURIComponent(item.productId)}/update?token=${encodeURIComponent(token)}`;
-        const warn =
-          item.status === "low" || (item.qty !== "" && Number(item.qty) <= getLowStockThreshold())
-            ? ' <span class="muted">⚠ low</span>'
+  if (isInventorySheetConfigured()) {
+    const tenantHint = invMeta.tenantId
+      ? ` · tenant <strong>${escapeHtml(invMeta.tenantId)}</strong>`
+      : "";
+    if (loadError) {
+      body = `<div class="alert-warn"><strong>Inventory load failed:</strong> ${escapeHtml(loadError)}</div>`;
+    }
+    if (sheetItems.length) {
+      const rows = sheetItems
+        .map((item) => {
+          const rowClass =
+            item.status === "out_of_stock"
+              ? "status-out"
+              : item.status === "low"
+                ? "status-low"
+                : "";
+          const tenantQ = invMeta.tenantId
+            ? `&tenant=${encodeURIComponent(invMeta.tenantId)}`
             : "";
-        return `<tr class="${rowClass}">
+          const action = `/admin/inventory/${encodeURIComponent(item.productId)}/update?token=${encodeURIComponent(token)}${tenantQ}`;
+          const warn =
+            item.status === "low" || (item.qty !== "" && Number(item.qty) <= getLowStockThreshold())
+              ? ' <span class="muted">⚠ low</span>'
+              : "";
+          return `<tr class="${rowClass}">
           <td>${escapeHtml(item.name)}${warn}</td>
           <td>${escapeHtml(item.status)}</td>
           <td>
@@ -2690,10 +2739,17 @@ app.get("/admin/inventory/view", async (req, res) => {
             </form>
           </td>
         </tr>`;
-      })
-      .join("");
-    body = `<p class="muted">Live stock from Google Sheet <strong>Inventory</strong> tab. <strong>Qty ≤ ${getLowStockThreshold()}</strong> auto-sets <em>low</em>; <strong>Qty 0</strong> sets <em>out_of_stock</em>. Bot warns customers on low stock.</p>
-${rows ? `<table><tr><th>Product</th><th>Status</th><th>Qty & update</th></tr>${rows}</table>` : "<p>Inventory tab is seeding — refresh in a moment.</p>"}`;
+        })
+        .join("");
+      body =
+        (body || "") +
+        `<p class="muted">Live stock from Google Sheet <strong>${escapeHtml(invMeta.tab || "Inventory")}</strong> tab${tenantHint}. <strong>Qty ≤ ${getLowStockThreshold()}</strong> auto-sets <em>low</em>; <strong>Qty 0</strong> sets <em>out_of_stock</em>. Bot warns customers on low stock.</p>
+<table><tr><th>Product</th><th>Status</th><th>Qty & update</th></tr>${rows}</table>`;
+    } else if (!loadError) {
+      body =
+        (body || "") +
+        `<p class="alert-warn">Sheet is configured but no inventory rows loaded (raw rows: ${invMeta.rawRowCount ?? "?"}). Try <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">refresh</a> or check the Inventory tab in Google Sheets.</p>`;
+    }
   } else {
     body = `<p class="muted">Sheet inventory not configured. Using <code>UNAVAILABLE_PRODUCTS</code> on Render.</p>
 <p><strong>Out of stock:</strong> ${labels.length ? escapeHtml(labels.join(", ")) : "(none)"}</p>
@@ -2701,7 +2757,7 @@ ${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.joi
 <p class="muted">To enable live inventory: add an <strong>Inventory</strong> tab to your Sheet (auto-seeded on first load). Same <code>GOOGLE_LEADS_SHEET_ID</code>.</p>`;
   }
 
-  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}">JSON API</a></p>`;
+  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">JSON API</a>${isInventorySheetConfigured() ? ` · <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">Force refresh</a>` : ""}</p>`;
 
   res.type("html").send(
     renderPage({ title: "Inventory", active: "inventory", token, body, flash: adminFlash(req) })
@@ -2711,22 +2767,25 @@ ${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.joi
 app.post("/admin/inventory/:productId/update", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const token = adminToken(req);
+  const tenantQ = req.query.tenant ? `&tenant=${encodeURIComponent(req.query.tenant)}` : "";
   try {
-    const result = await updateProductFields(req.params.productId, {
-      status: req.body.status,
-      qty: req.body.qty,
-      notes: req.body.notes,
-    });
+    const result = await runAdminWithTenant(req, () =>
+      updateProductFields(req.params.productId, {
+        status: req.body.status,
+        qty: req.body.qty,
+        notes: req.body.notes,
+      })
+    );
     if (!result?.ok) {
       return res.redirect(
-        `/admin/inventory/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+        `/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&error=${encodeURIComponent(result?.reason || "Update failed")}`
       );
     }
-    await refreshInventoryCache();
-    res.redirect(`/admin/inventory/view?token=${encodeURIComponent(token)}&saved=1`);
+    await runAdminWithTenant(req, () => refreshInventoryCache());
+    res.redirect(`/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&saved=1`);
   } catch (err) {
     res.redirect(
-      `/admin/inventory/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
+      `/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&error=${encodeURIComponent(err.message)}`
     );
   }
 });
@@ -2813,22 +2872,47 @@ app.get("/admin/handoffs", (req, res) => {
 
 app.get("/admin/inventory", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const { labels, unknown, source } = parseUnavailableProductLabels();
   let sheetItems = [];
-  if (isInventorySheetConfigured()) {
-    try {
-      const inv = await listInventory();
-      sheetItems = inv.items || [];
-    } catch (_) {
-      /* JSON still returns env fallback */
-    }
+  let loadError = null;
+  let inv = null;
+
+  try {
+    inv = await runAdminWithTenant(req, () =>
+      req.query.refresh === "1" ? refreshInventoryCache() : listInventory()
+    );
+    sheetItems = inv.items || [];
+    if (inv.parseError) loadError = inv.parseError;
+  } catch (err) {
+    loadError = err.message;
   }
+
+  const labels = inv?.unavailable?.length
+    ? inv.unavailable
+    : isInventorySheetConfigured() && !sheetItems.length
+      ? parseEnvUnavailableProductLabels().labels
+      : parseUnavailableProductLabels().labels;
+  const unknown = parseEnvUnavailableProductLabels().unknown;
+  const source =
+    isInventorySheetConfigured() && (sheetItems.length || inv?.unavailable?.length)
+      ? "sheet"
+      : isInventorySheetConfigured() && sheetItems.length === 0 && labels.length
+        ? "env_fallback"
+        : isInventorySheetConfigured()
+          ? "sheet"
+          : "env";
+
   res.json({
-    source: source || "env",
+    source,
     unavailable: labels,
     unknownTokens: unknown,
     sheetConfigured: isInventorySheetConfigured(),
     items: sheetItems,
+    tenantId: inv?.tenantId || resolveAdminTenant(req).tenant?.id || null,
+    spreadsheetId: inv?.sheetId || null,
+    tab: inv?.tab || null,
+    rawRowCount: inv?.rawRowCount ?? null,
+    dataRowCount: inv?.dataRowCount ?? null,
+    loadError,
     catalog: CATALOG_PRODUCTS.map((p) => ({
       id: p.id,
       label: p.label,
@@ -2836,7 +2920,7 @@ app.get("/admin/inventory", async (req, res) => {
       alternative: p.alternative,
     })),
     hint: isInventorySheetConfigured()
-      ? "Live inventory from Google Sheet Inventory tab. Use /admin/inventory/view to update."
+      ? "Live inventory from Google Sheet Inventory tab. Use /admin/inventory/view to update. Add ?refresh=1 to bypass cache. Add ?tenant=beantol for multi-tenant."
       : "Set UNAVAILABLE_PRODUCTS on Render, or add Inventory tab to Sheet for live updates.",
   });
 });
