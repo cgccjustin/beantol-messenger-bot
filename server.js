@@ -3195,6 +3195,36 @@ app.get("/admin/openai-test", async (req, res) => {
   }
 });
 
+app.get("/admin/google-sheets-test", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  if (!isInventorySheetConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      error: "Google Sheets not configured (GOOGLE_SERVICE_ACCOUNT_JSON + leads sheet id).",
+    });
+  }
+  try {
+    const inv = await runAdminWithTenant(req, () => refreshInventoryCache());
+    res.json({
+      ok: true,
+      transport: "https",
+      tenantId: inv.tenantId || null,
+      spreadsheetId: inv.sheetId || null,
+      tab: inv.tab || null,
+      itemCount: inv.items?.length || 0,
+      unavailable: inv.unavailable || [],
+      rawRowCount: inv.rawRowCount ?? null,
+      parseError: inv.parseError || null,
+    });
+  } catch (err) {
+    res.status(502).json({
+      ok: false,
+      transport: "https",
+      error: err.message,
+    });
+  }
+});
+
 app.get("/admin/test-email", async (req, res) => {
   if (!requireAdmin(req, res)) return;
 
