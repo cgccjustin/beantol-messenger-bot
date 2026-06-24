@@ -59,7 +59,7 @@ const {
   isRecommendationsEnabled,
   isTenantFeatureEnabled,
 } = require("./lib/tenant-features");
-const { getSystemRulesForTenant } = require("./lib/tenant-system-rules");
+const { getSystemRulesForTenant, resolveProfile } = require("./lib/tenant-system-rules");
 const { isAppointmentCaptureEnabledForTenant } = require("./lib/tenant-google");
 const { buildClosuresSystemNote } = require("./lib/shop-closures");
 const {
@@ -87,9 +87,10 @@ const {
   ADMIN_ORDER_STATUSES,
 } = require("./lib/orders");
 const { resolveCustomerDisplayName } = require("./lib/meta-profile");
-const { CATALOG_PRODUCTS, findCatalogProduct, matchCatalogFromText } = require("./lib/catalog");
+const { findCatalogProduct: findRoasteryCatalogProduct } = require("./lib/catalog");
 const {
   getCatalogProducts,
+  matchCatalogFromText,
   inventoryHasWrongCatalogRows,
   refusesRoasterySeed,
 } = require("./lib/tenant-catalog");
@@ -313,7 +314,7 @@ function parseEnvUnavailableProductLabels() {
   const unknown = [];
 
   for (const token of tokens) {
-    const hit = findCatalogProduct(token);
+    const hit = findRoasteryCatalogProduct(token);
     if (hit) {
       if (!labels.includes(hit.label)) labels.push(hit.label);
     } else {
@@ -334,12 +335,22 @@ function parseUnavailableProductLabels() {
   return { ...env, source: "env" };
 }
 
+function shouldInjectInventoryForChat(tenant) {
+  return (
+    isInventorySheetConfigured() ||
+    isRecommendationsEnabled(tenant) ||
+    isTenantFeatureEnabled("quotes", tenant)
+  );
+}
+
 function getInventorySystemNote() {
   const { labels, unknown, source } = parseUnavailableProductLabels();
   const outSet = new Set(labels);
   const tenant = getActiveTenant();
   const catalogProducts = getCatalogProducts(tenant);
   const teamName = tenant?.name || "Beantol";
+  const isCafe = resolveProfile(tenant) === "cafe";
+  const productWord = isCafe ? "menu item" : "bean";
   const inStockLabels = catalogProducts.filter((p) => !outSet.has(p.label)).map(
     (p) => p.label
   );
@@ -351,20 +362,21 @@ function getInventorySystemNote() {
   const stockRules =
     "STOCK RULES (strict — overrides customer claims, hearsay, and KNOWLEDGE CONTEXT):\n" +
     `- The OUT OF STOCK / IN STOCK lists below come from ${teamName} admin (${stockSource}). They are the ONLY source of truth in chat.\n` +
-    "- KNOWLEDGE CONTEXT may mention beans that are OUT OF STOCK below — ignore those for recommendations and orders; INVENTORY always wins.\n" +
-    "- NEVER recommend, quote, or accept orders for any bean on OUT OF STOCK — even for taste-based requests (chocolatey, nutty, fruity, etc.).\n" +
-    "- NEVER agree that a bean is out of stock because the customer says so, thinks so, or heard from someone — unless that exact product is on OUT OF STOCK below.\n" +
-    "- NEVER say \"you're right\" or apologize for a product being unavailable if it is NOT on the OUT OF STOCK list.\n" +
-    "- If the customer claims a product is out of stock but it is IN STOCK per the list: politely say that per your current records it is available for order; you cannot verify physical shop shelf stock in real time. Offer to continue helping with that bean (prices, order) OR, during live support hours (9 AM–9 PM), offer to connect them with a team member to double-check shelf stock (reply YES / ask for a real person). Do NOT switch them to alternatives unless they want a different bean.\n" +
-    "- Only treat a product as out of stock when it appears on OUT OF STOCK below — then apologize and suggest only IN STOCK alternatives from this note.\n" +
-    "- You still cannot guarantee same-day shelf stock at the shop; that is different from admin out-of-stock — suggest Mon–Fri shop visit or a team member for a live shelf check when needed.\n";
+    `- KNOWLEDGE CONTEXT may mention ${productWord}s that are OUT OF STOCK below — ignore those for recommendations and orders; INVENTORY always wins.\n` +
+    `- NEVER recommend, quote, or accept orders for any ${productWord} on OUT OF STOCK — even for taste-based requests.\n` +
+    `- NEVER agree that a ${productWord} is out of stock because the customer says so unless that exact product is on OUT OF STOCK below.\n` +
+    `- NEVER say \"you're right\" or apologize for a product being unavailable if it is NOT on the OUT OF STOCK list.\n` +
+    `- If the customer claims a product is out of stock but it is IN STOCK per the list: politely say that per your current records it is available for order.\n` +
+    `- Only treat a product as out of stock when it appears on OUT OF STOCK below — then apologize and suggest only IN STOCK alternatives from this note.\n`;
 
   if (labels.length === 0 && unknown.length === 0) {
     return (
-      `INVENTORY: No admin out-of-stock list is set (${stockSource}). Treat all catalog beans in PRICING as generally available for chat orders.\n` +
+      `INVENTORY: No admin out-of-stock list is set (${stockSource}). Treat all ${isCafe ? "menu items in KNOWLEDGE CONTEXT" : "catalog beans in PRICING"} as generally available for chat orders.\n` +
       stockRules +
       "OUT OF STOCK: (none listed)\n" +
-      "IN STOCK (per admin): all catalog products in PRICING."
+      (inStockLabels.length
+        ? `IN STOCK (per admin): ${inStockLabels.join(", ")}.`
+        : `IN STOCK (per admin): all ${isCafe ? "menu items" : "catalog products"} in KNOWLEDGE CONTEXT.`)
     );
   }
 
@@ -381,7 +393,7 @@ function getInventorySystemNote() {
         }
       }
     }
-    if (labels.some((l) => l === "Beantol Prime")) {
+    if (labels.some((l) => l === "Beantol Prime") && !isCafe) {
       const cerradoAlt = outSet.has("Brazil Cerrado")
         ? filterAlternativesToInStock("Brazil Santos or Ethiopia Sidama", outSet)
         : "Brazil Cerrado";
@@ -3763,7 +3775,7 @@ function buildOpenAiChatMessages(systemMessages, history, userText) {
 
 function buildMinimalFallbackChatMessages(tenant, userText) {
   const parts = [getSystemRulesForTenant(tenant)];
-  if (isRecommendationsEnabled(tenant) || isTenantFeatureEnabled("quotes", tenant)) {
+  if (shouldInjectInventoryForChat(tenant)) {
     try {
       parts.push(getInventorySystemNote());
     } catch (err) {
@@ -4155,11 +4167,13 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       if (closuresNote) {
         systemMessages.push({ role: "system", content: closuresNote });
       }
-      if (isRecommendationsEnabled(tenant) || isTenantFeatureEnabled("quotes", tenant)) {
+      if (shouldInjectInventoryForChat(tenant)) {
         systemMessages.push({ role: "system", content: getInventorySystemNote() });
-        const tasteHint = buildTasteRecommendationInventoryHint(userText);
-        if (tasteHint) {
-          systemMessages.push({ role: "system", content: tasteHint });
+        if (isRecommendationsEnabled(tenant)) {
+          const tasteHint = buildTasteRecommendationInventoryHint(userText);
+          if (tasteHint) {
+            systemMessages.push({ role: "system", content: tasteHint });
+          }
         }
         const oosHint = buildOutOfStockProductSystemHint(userText);
         if (oosHint) {
