@@ -258,6 +258,7 @@ const {
   prewarmHistory,
   getChatHistory,
   appendChatHistory,
+  sanitizeMessagesForOpenAi,
 } = require("./lib/chat-history-store");
 
 function getSupportLocalHour() {
@@ -3851,7 +3852,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       "Bot is running but OpenAI is not configured yet. Please add OPENAI_API_KEY.";
   } else {
     try {
-      const history = getChatHistory(senderId);
+      const history = sanitizeMessagesForOpenAi(getChatHistory(senderId));
       const knowledgeContext = await rag.retrieveKnowledgeContext(
         openai,
         userText,
@@ -3969,15 +3970,30 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       }
       const completion = await openai.chat.completions.create({
         model: OPENAI_MODEL,
-        messages: [...systemMessages, ...history, { role: "user", content: userText }],
+        messages: [
+          ...systemMessages.filter(
+            (m) => m?.role === "system" && typeof m.content === "string" && m.content.trim()
+          ),
+          ...history,
+          { role: "user", content: String(userText || "").trim() || "(empty message)" },
+        ],
         max_tokens: 500,
       });
       reply =
         completion.choices[0]?.message?.content?.trim() ||
         "Sorry, I could not generate a reply. Please try again.";
-      reply = enforceOutOfStockOrderPolicy(userText, reply);
+      try {
+        reply = enforceOutOfStockOrderPolicy(userText, reply);
+      } catch (policyErr) {
+        console.warn("Out-of-stock policy check:", policyErr.message);
+      }
     } catch (err) {
-      console.error("OpenAI error:", err.message);
+      console.error(
+        "Chat completion failed:",
+        err.message,
+        err.status || err.code || "",
+        err.stack?.split("\n")[0] || ""
+      );
       reply =
         "Sorry, I am having trouble right now. Please try again in a moment.";
     }
@@ -4437,11 +4453,9 @@ function hasMessageEchoesSubscription(status) {
     console.warn("Knowledge bootstrap:", err.message);
   }
   if (isInventorySheetConfigured()) {
-    try {
-      await refreshInventoryCache();
-    } catch (err) {
+    refreshInventoryCache().catch((err) => {
       console.warn("Inventory sheet load:", err.message);
-    }
+    });
   }
   Promise.all([loadPageId().catch(() => {}), loadMetaAppId().catch(() => {})]).then(() =>
     ensureMessagingSubscriptions()
