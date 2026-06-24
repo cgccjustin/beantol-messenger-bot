@@ -188,8 +188,8 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
+const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const HANDOFF_TIMEOUT_HOURS = Number(process.env.HANDOFF_TIMEOUT_HOURS || 24);
 const HANDOFF_ADMIN_IDLE_MINUTES = Number(process.env.HANDOFF_ADMIN_IDLE_MINUTES || 15);
@@ -974,6 +974,7 @@ function formatWebhookDebugDetail(e) {
   if (e.sender) parts.push(`sender=${e.sender}`);
   if (e.text) parts.push(`text=${e.text}`);
   if (e.field) parts.push(`field=${e.field}`);
+  if (e.detail) parts.push(String(e.detail).slice(0, 120));
   return parts.join(" · ");
 }
 
@@ -3058,6 +3059,36 @@ app.get("/admin/subscribe-webhooks", async (req, res) => {
 });
 
 // --- Admin: send a test email (Resend or SMTP) ---
+app.get("/admin/openai-test", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+
+  if (!openai) {
+    return res.status(503).json({
+      ok: false,
+      error: "OPENAI_API_KEY is missing or empty on this server.",
+    });
+  }
+
+  try {
+    const completion = await requestOpenAiChatCompletion([
+      { role: "system", content: "Reply with exactly: OpenAI OK" },
+      { role: "user", content: "ping" },
+    ]);
+    res.json({
+      ok: true,
+      model: OPENAI_MODEL,
+      reply: completion.choices[0]?.message?.content?.trim() || "",
+    });
+  } catch (err) {
+    res.status(502).json({
+      ok: false,
+      model: OPENAI_MODEL,
+      error: err.message,
+      status: err.status || err.code || null,
+    });
+  }
+});
+
 app.get("/admin/test-email", async (req, res) => {
   if (!requireAdmin(req, res)) return;
 
@@ -3521,6 +3552,45 @@ async function handleStructuredFlows(senderId, userText, platform, welcomeState 
   return false;
 }
 
+function filterSystemMessagesForOpenAi(systemMessages) {
+  return (systemMessages || []).filter(
+    (m) => m?.role === "system" && typeof m.content === "string" && m.content.trim()
+  );
+}
+
+function buildOpenAiChatMessages(systemMessages, history, userText) {
+  const safeHistory = sanitizeMessagesForOpenAi(history).slice(-16);
+  const userContent = String(userText || "").trim() || "(empty message)";
+  return [
+    ...filterSystemMessagesForOpenAi(systemMessages),
+    ...safeHistory,
+    { role: "user", content: userContent },
+  ];
+}
+
+function buildMinimalFallbackChatMessages(tenant, userText) {
+  const parts = [getSystemRulesForTenant(tenant)];
+  if (isRecommendationsEnabled(tenant) || isTenantFeatureEnabled("quotes", tenant)) {
+    try {
+      parts.push(getInventorySystemNote());
+    } catch (err) {
+      console.warn("Inventory note skipped on fallback:", err.message);
+    }
+  }
+  return [
+    { role: "system", content: parts.filter(Boolean).join("\n\n").slice(0, 24000) },
+    { role: "user", content: String(userText || "").trim() || "hello" },
+  ];
+}
+
+async function requestOpenAiChatCompletion(messages) {
+  return openai.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages,
+    max_tokens: 500,
+  });
+}
+
 async function handleMessage(senderId, userText, platform = "messenger", messageContext = {}) {
   console.log(`Message from ${senderId} (${platformLabel(platform)}): ${userText}`);
 
@@ -3968,17 +4038,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
             "HANDOFF STATUS: This customer asked for a human agent and the team was emailed. No admin has taken over yet — keep answering their questions helpfully. Do NOT output [[HANDOFF]] again unless they explicitly say they cannot wait for a person.",
         });
       }
-      const completion = await openai.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages: [
-          ...systemMessages.filter(
-            (m) => m?.role === "system" && typeof m.content === "string" && m.content.trim()
-          ),
-          ...history,
-          { role: "user", content: String(userText || "").trim() || "(empty message)" },
-        ],
-        max_tokens: 500,
-      });
+      const completion = await requestOpenAiChatCompletion(
+        buildOpenAiChatMessages(systemMessages, history, userText)
+      );
       reply =
         completion.choices[0]?.message?.content?.trim() ||
         "Sorry, I could not generate a reply. Please try again.";
@@ -3994,8 +4056,36 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         err.status || err.code || "",
         err.stack?.split("\n")[0] || ""
       );
-      reply =
-        "Sorry, I am having trouble right now. Please try again in a moment.";
+      recordWebhookDebug({
+        kind: "chat_completion_error",
+        detail: `${err.message} status=${err.status || err.code || "n/a"}`,
+      });
+      try {
+        const completion = await requestOpenAiChatCompletion(
+          buildMinimalFallbackChatMessages(tenant, userText)
+        );
+        const fallbackReply = completion.choices[0]?.message?.content?.trim();
+        if (fallbackReply) {
+          reply = fallbackReply;
+          recordWebhookDebug({ kind: "chat_completion_retry_ok" });
+        } else {
+          reply =
+            "Sorry, I am having trouble right now. Please try again in a moment.";
+        }
+      } catch (retryErr) {
+        console.error(
+          "Chat completion retry failed:",
+          retryErr.message,
+          retryErr.status || retryErr.code || "",
+          retryErr.stack?.split("\n")[0] || ""
+        );
+        recordWebhookDebug({
+          kind: "chat_completion_retry_error",
+          detail: `${retryErr.message} status=${retryErr.status || retryErr.code || "n/a"}`,
+        });
+        reply =
+          "Sorry, I am having trouble right now. Please try again in a moment.";
+      }
     }
   }
 
