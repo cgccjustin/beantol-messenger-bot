@@ -107,10 +107,11 @@ const {
   buildRecommendationSystemNote,
 } = require("./lib/recommendations");
 const {
-  buildOutOfStockOrderBlock,
-  enforceOutOfStockOrderPolicy,
+  buildOutOfStockProductReply,
+  enforceOutOfStockProductPolicy,
   filterAlternativesToInStock,
   buildTasteRecommendationInventoryHint,
+  buildOutOfStockProductSystemHint,
 } = require("./lib/inventory-availability");
 const { requestChatCompletion, isTransientError } = require("./lib/openai-chat");
 const {
@@ -3691,13 +3692,13 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     });
   }
 
-  const outOfStockOrderReply = buildOutOfStockOrderBlock(userText);
-  if (outOfStockOrderReply) {
+  const outOfStockProductReply = buildOutOfStockProductReply(userText);
+  if (outOfStockProductReply) {
     captureLeadFromMessage(senderId, userText, platform, {
-      interest: matchCatalogFromText(userText)?.label || "out of stock order",
+      interest: matchCatalogFromText(userText)?.label || "out of stock inquiry",
       stage: "browsing",
     });
-    await deliverCustomerReply(senderId, userText, platform, outOfStockOrderReply, welcomeState);
+    await deliverCustomerReply(senderId, userText, platform, outOfStockProductReply, welcomeState);
     return;
   }
 
@@ -3968,6 +3969,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         if (tasteHint) {
           systemMessages.push({ role: "system", content: tasteHint });
         }
+        const oosHint = buildOutOfStockProductSystemHint(userText);
+        if (oosHint) {
+          systemMessages.push({ role: "system", content: oosHint });
+        }
       }
       if (isRecommendationsEnabled(tenant)) {
         systemMessages.push({ role: "system", content: buildRecommendationSystemNote() });
@@ -4070,7 +4075,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         completion.choices[0]?.message?.content?.trim() ||
         "Sorry, I could not generate a reply. Please try again.";
       try {
-        reply = enforceOutOfStockOrderPolicy(userText, reply);
+        reply = enforceOutOfStockProductPolicy(userText, reply);
       } catch (policyErr) {
         console.warn("Out-of-stock policy check:", policyErr.message);
       }
