@@ -23,9 +23,9 @@
         "eventsSheetTab": "Events"
       },
       "notify": {
-        "handoffEmail": "your-alerts@example.com",
-        "leadEmail": "your-alerts@example.com",
-        "orderEmail": "your-alerts@example.com"
+        "handoffEmail": "your-alerts@example.com, second@example.com",
+        "leadEmail": "your-alerts@example.com, second@example.com",
+        "orderEmail": "your-alerts@example.com, second@example.com"
       },
       "shop": {
         "address": "Holy Family Village 2, Governor Cuenco Avenue, Banilad, Cebu City (beside the guardhouse).",
@@ -72,9 +72,9 @@
         "eventsSheetTab": "Events"
       },
       "notify": {
-        "handoffEmail": "your-alerts@example.com",
-        "leadEmail": "your-alerts@example.com",
-        "orderEmail": "your-alerts@example.com"
+        "handoffEmail": "your-alerts@example.com, second@example.com",
+        "leadEmail": "your-alerts@example.com, second@example.com",
+        "orderEmail": "your-alerts@example.com, second@example.com"
       },
       "shop": {
         "address": "YOUR_KK_SHOP_ADDRESS",
@@ -121,9 +121,9 @@
         "eventsSheetTab": "Events"
       },
       "notify": {
-        "handoffEmail": "your-alerts@example.com",
-        "leadEmail": "your-alerts@example.com",
-        "orderEmail": "your-alerts@example.com"
+        "handoffEmail": "your-alerts@example.com, second@example.com",
+        "leadEmail": "your-alerts@example.com, second@example.com",
+        "orderEmail": "your-alerts@example.com, second@example.com"
       },
       "shop": {
         "address": "YOUR_OFFBEAT_SHOP_ADDRESS",

@@ -51,6 +51,8 @@ const {
   getHandoffReply,
   getBotResumeReply,
   getNotifyEmail,
+  getNotifyRecipients,
+  parseNotifyRecipients,
   getShopHours,
   businessName,
 } = require("./lib/tenant-messages");
@@ -1291,7 +1293,17 @@ async function expireStaleAdminTakeovers() {
 let mailTransporter = null;
 
 async function sendAlertEmail({ subject, text, to }) {
-  const recipient = to || HANDOFF_NOTIFY_EMAIL;
+  let recipients = [];
+  if (to) {
+    if (Array.isArray(to)) {
+      recipients = to.map((s) => String(s).trim()).filter((s) => s.includes("@"));
+    } else {
+      recipients = parseNotifyRecipients(to);
+    }
+  }
+  if (!recipients.length) {
+    recipients = getNotifyRecipients("handoff", getActiveTenant());
+  }
   const provider = getEmailProvider();
   if (!provider) {
     throw new Error(
@@ -1308,7 +1320,7 @@ async function sendAlertEmail({ subject, text, to }) {
       },
       body: JSON.stringify({
         from: EMAIL_FROM,
-        to: [recipient],
+        to: recipients,
         subject,
         text,
       }),
@@ -1318,7 +1330,7 @@ async function sendAlertEmail({ subject, text, to }) {
     if (!response.ok) {
       throw new Error(data.message || data.error || `Resend HTTP ${response.status}`);
     }
-    return { provider: "resend", id: data.id };
+    return { provider: "resend", id: data.id, recipients };
   }
 
   const transporter = getMailTransporter();
@@ -1328,11 +1340,11 @@ async function sendAlertEmail({ subject, text, to }) {
 
   const info = await transporter.sendMail({
     from: SMTP_FROM,
-    to: recipient,
+    to: recipients.join(", "),
     subject,
     text,
   });
-  return { provider: "smtp", id: info.messageId };
+  return { provider: "smtp", id: info.messageId, recipients };
 }
 
 function recentUserMessages(senderId, limit = 5) {
@@ -1458,6 +1470,8 @@ function buildQuoteShareUrl(quote) {
 async function notifyOrderByEmail(order, isNew) {
   if (!isEmailConfigured() || !order) return false;
 
+  const tenant = getActiveTenant();
+  const brand = businessName(tenant);
   const channel = order.platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
   const action = isNew ? "New order" : "Order updated";
   const adminPanelUrl =
@@ -1466,9 +1480,9 @@ async function notifyOrderByEmail(order, isNew) {
       : "";
 
   try {
-    await sendAlertEmail({
-      to: ORDER_NOTIFY_EMAIL,
-      subject: `Beantol — ${action} ${order.orderId} (${order.orderStatus})`,
+    const result = await sendAlertEmail({
+      to: getNotifyRecipients("order", tenant),
+      subject: `${brand} — ${action} ${order.orderId} (${order.orderStatus})`,
       text: [
         `${action} on ${channel}.`,
         "",
@@ -1494,7 +1508,7 @@ async function notifyOrderByEmail(order, isNew) {
         .filter(Boolean)
         .join("\n"),
     });
-    console.log(`Order alert email sent for ${order.orderId}.`);
+    console.log(`Order alert email sent for ${order.orderId} to ${(result.recipients || []).join(", ")}.`);
     return true;
   } catch (err) {
     console.error("Order alert email failed:", err.message);
@@ -1505,6 +1519,8 @@ async function notifyOrderByEmail(order, isNew) {
 async function notifyPaymentProofByEmail(senderId, userText, platform = "messenger") {
   if (!isEmailConfigured()) return false;
 
+  const tenant = getActiveTenant();
+  const brand = businessName(tenant);
   const channel = platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
   const adminPanelUrl =
     PUBLIC_BASE_URL && ADMIN_SECRET
@@ -1512,9 +1528,9 @@ async function notifyPaymentProofByEmail(senderId, userText, platform = "messeng
       : "";
 
   try {
-    await sendAlertEmail({
-      to: ORDER_NOTIFY_EMAIL,
-      subject: "Beantol — Customer says they sent payment proof (image)",
+    const result = await sendAlertEmail({
+      to: getNotifyRecipients("order", tenant),
+      subject: `${brand} — Customer says they sent payment proof (image)`,
       text: [
         `Customer says they sent payment proof (image attached) on ${channel}.`,
         "",
@@ -1528,7 +1544,7 @@ async function notifyPaymentProofByEmail(senderId, userText, platform = "messeng
         .filter(Boolean)
         .join("\n"),
     });
-    console.log(`Payment proof alert email sent for ${senderId}.`);
+    console.log(`Payment proof alert email sent for ${senderId} to ${(result.recipients || []).join(", ")}.`);
     return true;
   } catch (err) {
     console.error("Payment proof alert email failed:", err.message);
@@ -1539,6 +1555,8 @@ async function notifyPaymentProofByEmail(senderId, userText, platform = "messeng
 async function notifyLeadByEmail(lead, isNew) {
   if (!isEmailConfigured() || !lead) return false;
 
+  const tenant = getActiveTenant();
+  const brand = businessName(tenant);
   const channel = lead.platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
   const action = isNew ? "New lead" : "Lead updated";
   const adminPanelUrl =
@@ -1547,9 +1565,9 @@ async function notifyLeadByEmail(lead, isNew) {
       : "";
 
   try {
-    await sendAlertEmail({
-      to: LEAD_NOTIFY_EMAIL,
-      subject: `Beantol — ${action} (${lead.stage})`,
+    const result = await sendAlertEmail({
+      to: getNotifyRecipients("lead", tenant),
+      subject: `${brand} — ${action} (${lead.stage})`,
       text: [
         `${action} on ${channel}.`,
         "",
@@ -1580,6 +1598,8 @@ async function notifyLeadByEmail(lead, isNew) {
 async function notifyAppointmentByEmail(appointment) {
   if (!isEmailConfigured() || !appointment) return false;
 
+  const tenant = getActiveTenant();
+  const brand = businessName(tenant);
   const channel =
     appointment.platform === "instagram" ? "Instagram DM" : "Facebook Messenger";
   const adminUrl =
@@ -1588,9 +1608,9 @@ async function notifyAppointmentByEmail(appointment) {
       : "";
 
   try {
-    await sendAlertEmail({
-      to: LEAD_NOTIFY_EMAIL,
-      subject: `Beantol — Appointment request ${appointment.appointmentId}`,
+    const result = await sendAlertEmail({
+      to: getNotifyRecipients("lead", tenant),
+      subject: `${brand} — Appointment request ${appointment.appointmentId}`,
       text: [
         `New appointment request on ${channel}.`,
         "",
@@ -1606,7 +1626,9 @@ async function notifyAppointmentByEmail(appointment) {
         .filter(Boolean)
         .join("\n"),
     });
-    console.log(`Appointment alert email sent for ${appointment.appointmentId}.`);
+    console.log(
+      `Appointment alert email sent for ${appointment.appointmentId} to ${(result.recipients || []).join(", ")}.`
+    );
     return true;
   } catch (err) {
     console.error("Appointment alert email failed:", err.message);
@@ -1690,9 +1712,10 @@ async function notifyHandoffByEmail(senderId, userText, platform = "messenger") 
       ? `${PUBLIC_BASE_URL}/admin?token=${encodeURIComponent(ADMIN_SECRET)}`
       : "";
 
+  const handoffRecipients = getNotifyRecipients("handoff", tenant);
   const result = await sendAlertEmail({
     subject: `${brand} — customer wants a human (${channel})`,
-    to: getNotifyEmail("handoff", tenant) || HANDOFF_NOTIFY_EMAIL,
+    to: handoffRecipients,
     text: [
       `A customer asked to speak with a real person on ${channel}.`,
       "",
@@ -1714,7 +1737,7 @@ async function notifyHandoffByEmail(senderId, userText, platform = "messenger") 
   });
 
   console.log(
-    `Handoff email sent to ${getNotifyEmail("handoff", tenant) || HANDOFF_NOTIFY_EMAIL} via ${result.provider}`
+    `Handoff email sent to ${handoffRecipients.join(", ")} via ${result.provider}`
   );
 }
 
@@ -1750,12 +1773,17 @@ async function notifyDeliveryByEmail(
 
   const channel = platformLabel(platform);
   const now = new Date().toISOString();
+  const tenant = getActiveTenant();
+  const brand = businessName(tenant);
+  const deliveryRecipients = getNotifyRecipients("handoff", tenant);
   try {
     const result = await sendAlertEmail({
-      subject: `Beantol — Maxim delivery inquiry (${channel})`,
+      subject: `${brand} — delivery inquiry (${channel})`,
+      to: deliveryRecipients,
       text: [
         `A customer asked about delivery on ${channel}.`,
         "",
+        `Shop: ${brand}${tenant?.id ? ` (${tenant.id})` : ""}`,
         `Time: ${now}`,
         `Channel: ${channel}`,
         `Trigger: ${source}`,
@@ -1768,7 +1796,7 @@ async function notifyDeliveryByEmail(
     });
     markDeliveryAlertSent(senderId);
     console.log(
-      `Delivery alert email sent to ${HANDOFF_NOTIFY_EMAIL} for ${senderId} (${source}) via ${result.provider}.`
+      `Delivery alert email sent to ${deliveryRecipients.join(", ")} for ${senderId} (${source}) via ${result.provider}.`
     );
   } catch (err) {
     console.error("Delivery alert email failed:", err.message);
@@ -2339,7 +2367,7 @@ app.get("/admin/sales/check-stale", async (req, res) => {
       );
     }
     await sendAlertEmail({
-      to: LEAD_NOTIFY_EMAIL,
+      to: getNotifyRecipients("lead", getActiveTenant()),
       subject: `Beantol — ${stale.length} lead(s) need follow-up`,
       text: [
         "These leads have not progressed in 3+ days:",
@@ -3316,13 +3344,15 @@ app.get("/admin/test-email", async (req, res) => {
   }
 
   try {
+    const testRecipients = getNotifyRecipients("handoff", getActiveTenant());
     const result = await sendAlertEmail({
       subject: "Beantol Messenger — test email",
       text: `If you received this, email is working via ${getEmailProvider()}.`,
+      to: testRecipients,
     });
     res.json({
       ok: true,
-      sentTo: HANDOFF_NOTIFY_EMAIL,
+      sentTo: testRecipients,
       provider: result.provider,
     });
   } catch (err) {
