@@ -10,7 +10,9 @@ const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
 const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote, buildNonWholesaleBulkSystemNote } = require("./lib/pricing");
 const {
-  isWeekend,
+  isShopOpenNow,
+  isShopClosedToday,
+  getShopStatusSystemNote,
   getWeekendSystemNote,
   buildWeekendPickupReply,
   buildWeekendDeliveryReply,
@@ -49,6 +51,7 @@ const {
   getHandoffReply,
   getBotResumeReply,
   getNotifyEmail,
+  getShopHours,
   businessName,
 } = require("./lib/tenant-messages");
 const {
@@ -3802,7 +3805,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     quotes: tenant?.features?.quotes,
     cebuDeliveryZones: tenant?.features?.cebuDeliveryZones,
     appointments: tenant?.features?.appointments,
-    isWeekend: isWeekend(),
+    isWeekend: isShopClosedToday(tenant),
+    shopOpenNow: isShopOpenNow(tenant),
+    shopHours: getShopHours(tenant),
     agentAvailable: isWithinLiveSupportHours(),
     platform,
   });
@@ -3935,7 +3940,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
 
   const postQuoteFlow = processPostQuoteFlowPreAi(senderId, userText, {
     agentAvailable: isWithinLiveSupportHours(),
-    isWeekend: isWeekend(),
+    isWeekend: isShopClosedToday(tenant),
   });
   if (postQuoteFlow.handled) {
     if (postQuoteFlow.captureOrder) {
@@ -3979,7 +3984,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     const pendingQuote = getQuoteConfirmSession(senderId)?.quote;
     const reply = buildPaymentProofAckReply({
       agentAvailable: isWithinLiveSupportHours(),
-      isWeekend: isWeekend(),
+      isWeekend: isShopClosedToday(tenant),
       quoteSummary: pendingQuote?.summary || "",
       quoteSubtotal: pendingQuote?.subtotal ?? null,
       hasImage: paymentResolution.hasImage !== false,
@@ -4049,7 +4054,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     }
 
     const cebuAreaDelivery = resolveCebuAreaDeliveryTurn(userText, {
-      isWeekend: isWeekend(),
+      isWeekend: isShopClosedToday(tenant),
       agentAvailable: isWithinLiveSupportHours(),
     });
     if (cebuAreaDelivery.handled) {
@@ -4063,17 +4068,17 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (
-    isWeekend() &&
+    isShopClosedToday(tenant) &&
     !isPostQuoteFlowActive(senderId) &&
-    isCebuDeliveryZonesEnabled()
+    isCebuDeliveryZonesEnabled(tenant)
   ) {
     const looksLikeDeliveryDetails = looksLikeDeliveryDetailsSubmission(userText);
     const pickupIntent = isWeekendPickupContext(userText);
     const deliveryIntent = isWeekendDeliveryContext(userText, { looksLikeDeliveryDetails });
     if (pickupIntent || deliveryIntent) {
       const reply = pickupIntent
-        ? buildWeekendPickupReply(isWithinLiveSupportHours())
-        : buildWeekendDeliveryReply(isWithinLiveSupportHours());
+        ? buildWeekendPickupReply(isWithinLiveSupportHours(), tenant)
+        : buildWeekendDeliveryReply(isWithinLiveSupportHours(), tenant);
       captureLeadFromMessage(senderId, userText, platform, {
         isDeliveryInquiry: deliveryIntent,
         deliveryTrigger: pickupIntent ? "weekend pickup inquiry" : "weekend delivery inquiry",
@@ -4122,6 +4127,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       const systemMessages = [
         { role: "system", content: getSystemRulesForTenant(tenant) },
         { role: "system", content: getSupportHoursSystemNote() },
+        { role: "system", content: getShopStatusSystemNote(tenant) },
         { role: "system", content: getReplyLanguageInstruction(senderId) },
       ];
       if (closuresNote) {
@@ -4141,10 +4147,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       if (isRecommendationsEnabled(tenant)) {
         systemMessages.push({ role: "system", content: buildRecommendationSystemNote() });
       }
-      if (isWeekend()) {
+      if (isShopClosedToday(tenant) && isCebuDeliveryZonesEnabled(tenant)) {
         systemMessages.push({
           role: "system",
-          content: getWeekendSystemNote(isWithinLiveSupportHours()),
+          content: getWeekendSystemNote(isWithinLiveSupportHours(), tenant),
         });
       }
       if (isCebuDeliveryZonesEnabled(tenant)) {

@@ -127,7 +127,10 @@
       },
       "shop": {
         "address": "YOUR_OFFBEAT_SHOP_ADDRESS",
-        "hours": "Monday–Saturday, 9:00 AM–6:00 PM (shop closed on Sundays)."
+        "hours": "Monday–Saturday, 9:00 AM–6:00 PM (shop closed on Sundays).",
+        "openDays": [1, 2, 3, 4, 5, 6],
+        "openHour": 9,
+        "closeHour": 18
       },
       "branding": {
         "businessName": "OFFBEAT BREW",
