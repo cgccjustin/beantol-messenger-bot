@@ -3691,6 +3691,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     await ensureInventoryLoaded().catch((err) => {
       console.warn("Inventory preload:", err.message);
     });
+    const { getCachedInventoryItems, getCachedUnavailableProductIds } = require("./lib/inventory-sheet");
+    if (!getCachedInventoryItems().length) {
+      await refreshInventoryCache().catch((err) => {
+        console.warn("Inventory force refresh:", err.message);
+      });
+    }
   }
 
   const outOfStockProductReply = buildOutOfStockProductReply(userText);
