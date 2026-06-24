@@ -125,6 +125,7 @@ const {
   filterAlternativesToInStock,
   buildTasteRecommendationInventoryHint,
   buildOutOfStockProductSystemHint,
+  buildCafeMenuListSystemHint,
   getUnavailableLabels,
 } = require("./lib/inventory-availability");
 const { requestChatCompletion, isTransientError } = require("./lib/openai-chat");
@@ -3905,7 +3906,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
-  const inStockTasteReply = buildInStockTasteRecommendationReply(userText);
+  const inStockTasteReply = isRecommendationsEnabled(tenant)
+    ? buildInStockTasteRecommendationReply(userText)
+    : null;
   if (inStockTasteReply) {
     captureLeadFromMessage(senderId, userText, platform, {
       interest: "nutty chocolatey beans",
@@ -4188,6 +4191,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         const oosHint = buildOutOfStockProductSystemHint(userText);
         if (oosHint) {
           systemMessages.push({ role: "system", content: oosHint });
+        }
+        const cafeMenuHint = buildCafeMenuListSystemHint(userText);
+        if (cafeMenuHint) {
+          systemMessages.push({ role: "system", content: cafeMenuHint });
         }
       }
       if (isRecommendationsEnabled(tenant)) {
