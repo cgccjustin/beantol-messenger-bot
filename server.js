@@ -3078,7 +3078,12 @@ app.get("/admin/sync-knowledge", async (req, res) => {
       results: Array.isArray(index) ? index : undefined,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      error: err.message,
+      googleError: err.googleError || err.response?.data?.error || null,
+      status: err.status || err.response?.status || null,
+      tenantId: req.query.tenant || "all",
+    });
   }
 });
 
