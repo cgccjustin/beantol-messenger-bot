@@ -108,6 +108,7 @@ const {
 } = require("./lib/recommendations");
 const {
   buildOutOfStockProductReply,
+  buildInStockTasteRecommendationReply,
   enforceOutOfStockProductPolicy,
   filterAlternativesToInStock,
   buildTasteRecommendationInventoryHint,
@@ -3699,6 +3700,16 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       stage: "browsing",
     });
     await deliverCustomerReply(senderId, userText, platform, outOfStockProductReply, welcomeState);
+    return;
+  }
+
+  const inStockTasteReply = buildInStockTasteRecommendationReply(userText);
+  if (inStockTasteReply) {
+    captureLeadFromMessage(senderId, userText, platform, {
+      interest: "nutty chocolatey beans",
+      stage: "browsing",
+    });
+    await deliverCustomerReply(senderId, userText, platform, inStockTasteReply, welcomeState);
     return;
   }
 
