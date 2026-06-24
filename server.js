@@ -88,7 +88,11 @@ const {
 } = require("./lib/orders");
 const { resolveCustomerDisplayName } = require("./lib/meta-profile");
 const { CATALOG_PRODUCTS, findCatalogProduct, matchCatalogFromText } = require("./lib/catalog");
-const { getCatalogProducts } = require("./lib/tenant-catalog");
+const {
+  getCatalogProducts,
+  inventoryHasWrongCatalogRows,
+  refusesRoasterySeed,
+} = require("./lib/tenant-catalog");
 const {
   isInventorySheetConfigured,
   listInventory,
@@ -187,6 +191,7 @@ const {
   escapeHtml,
   adminUrl,
   renderPage,
+  renderTenantSwitcher,
   renderToolCard,
   optionTags,
   statCards,
@@ -2699,6 +2704,7 @@ app.get("/admin/inventory/view", async (req, res) => {
         tenantId: inv.tenantId,
         rawRowCount: inv.rawRowCount,
         parseError: inv.parseError,
+        wrongCatalog: inv.wrongCatalog,
       };
       labels = inv.unavailable || [];
       source = "sheet";
@@ -2711,13 +2717,22 @@ app.get("/admin/inventory/view", async (req, res) => {
     ({ labels, unknown, source } = parseUnavailableProductLabels());
   }
 
-  let body;
+  let body = renderTenantSwitcher(token, invMeta.tenantId || req.query.tenant, listTenants());
+
+  if (listTenants().length > 1 && !req.query.tenant) {
+    body +=
+      `<div class="alert-warn"><strong>Multi-tenant:</strong> Pick a shop above. Without <code>?tenant=…</code> this page defaults to <strong>${escapeHtml(getDefaultTenant()?.name || "Beantol")}</strong> — not Offbeat Brew.</div>`;
+  }
+
   if (isInventorySheetConfigured()) {
     const tenantHint = invMeta.tenantId
       ? ` · tenant <strong>${escapeHtml(invMeta.tenantId)}</strong>`
       : "";
     if (loadError) {
-      body = `<div class="alert-warn"><strong>Inventory load failed:</strong> ${escapeHtml(loadError)}</div>`;
+      body += `<div class="alert-warn"><strong>Inventory load failed:</strong> ${escapeHtml(loadError)}</div>`;
+    }
+    if (invMeta.wrongCatalog) {
+      body += `<div class="alert-warn"><strong>Wrong products detected</strong> — this sheet has Beantol roast SKUs but you are viewing <strong>${escapeHtml(invMeta.tenantId || "this tenant")}</strong>. <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId || "")}">Reseed from ${escapeHtml(invMeta.tenantId || "tenant")} catalog</a> to fix.</div>`;
     }
     if (sheetItems.length) {
       const rows = sheetItems
@@ -2750,17 +2765,16 @@ app.get("/admin/inventory/view", async (req, res) => {
         </tr>`;
         })
         .join("");
-      body =
-        (body || "") +
+      body +=
+        (body.includes("<table>") ? "" : "") +
         `<p class="muted">Live stock from Google Sheet <strong>${escapeHtml(invMeta.tab || "Inventory")}</strong> tab${tenantHint}. <strong>Qty ≤ ${getLowStockThreshold()}</strong> auto-sets <em>low</em>; <strong>Qty 0</strong> sets <em>out_of_stock</em>. Bot warns customers on low stock.</p>
 <table><tr><th>Product</th><th>Status</th><th>Qty & update</th></tr>${rows}</table>`;
     } else if (!loadError) {
-      body =
-        (body || "") +
-        `<p class="alert-warn">Sheet is configured but no inventory rows loaded (raw rows: ${invMeta.rawRowCount ?? "?"}). Try <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">refresh</a> or check the Inventory tab in Google Sheets.</p>`;
+      body +=
+        `<p class="alert-warn">Sheet is configured but no inventory rows loaded (raw rows: ${invMeta.rawRowCount ?? "?"}). Try <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">refresh</a> or check the Inventory tab in Google Sheets.${invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId)}">Seed ${escapeHtml(invMeta.tenantId)} menu</a>` : ""}</p>`;
     }
   } else {
-    body = `<p class="muted">Sheet inventory not configured. Using <code>UNAVAILABLE_PRODUCTS</code> on Render.</p>
+    body += `<p class="muted">Sheet inventory not configured. Using <code>UNAVAILABLE_PRODUCTS</code> on Render.</p>
 <p><strong>Out of stock:</strong> ${labels.length ? escapeHtml(labels.join(", ")) : "(none)"}</p>
 ${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.join(", "))}</p>` : ""}
 <p class="muted">To enable live inventory: add an <strong>Inventory</strong> tab to your Sheet (auto-seeded on first load). Same <code>GOOGLE_LEADS_SHEET_ID</code>.</p>`;
@@ -2769,7 +2783,15 @@ ${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.joi
   body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">JSON API</a>${isInventorySheetConfigured() ? ` · <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">Force refresh</a>` : ""}${isInventorySheetConfigured() && invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` · <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId)}" onclick="return confirm('Replace all Inventory rows with this tenant\\'s menu products?')">Reseed from catalog</a>` : ""}</p>`;
 
   res.type("html").send(
-    renderPage({ title: "Inventory", active: "inventory", token, body, flash: adminFlash(req) })
+    renderPage({
+      title: "Inventory",
+      active: "inventory",
+      token,
+      body,
+      flash: adminFlash(req),
+      req,
+      tenantId: invMeta.tenantId || req.query.tenant,
+    })
   );
 });
 
@@ -4742,9 +4764,13 @@ function hasMessageEchoesSubscription(status) {
   } catch (err) {
     console.warn("Knowledge bootstrap:", err.message);
   }
-  if (isInventorySheetConfigured()) {
-    refreshInventoryCache().catch((err) => {
-      console.warn("Inventory sheet load:", err.message);
+  for (const tenant of listTenants()) {
+    if (!tenant.google?.leadsSheetId) continue;
+    runWithTenant(tenant, () => {
+      if (!isInventorySheetConfigured()) return Promise.resolve();
+      return refreshInventoryCache();
+    }).catch((err) => {
+      console.warn(`Inventory preload [${tenant.id}]:`, err.message);
     });
   }
   Promise.all([loadPageId().catch(() => {}), loadMetaAppId().catch(() => {})]).then(() =>
