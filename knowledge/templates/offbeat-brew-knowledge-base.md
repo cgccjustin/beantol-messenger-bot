@@ -65,6 +65,21 @@ Coffee Series
 • Offbeat Dulce — ₱160
 • [Add every drink with hot/cold where applicable]
 
+IMPORTANT — All Coffee Series drinks (Offbeat Black, Offbeat White, Offbeat Mocha, Offbeat Dulce) are COLD BREW based, NOT espresso based. Never tell customers these drinks use espresso or an espresso base.
+
+
+Drink descriptions (Coffee Series)
+
+OFFBEAT WHITE — ₱140
+A smooth and creamy cold brew for those who enjoy rich coffee without bitterness. Made from our signature cold brew concentrate blended with our house milk mixture — bold caffeine kick with a balanced, velvety finish.
+Short version: Bold cold brew meets smooth creamy indulgence. Rich flavor, balanced sweetness, extraordinary refreshment.
+Cold brew based, not espresso based. Our cold brew process brings out deeper flavor, smoothness, and strength.
+
+OFFBEAT BLACK — ₱130
+Pure, bold, and unapologetically coffee. Made from our signature cold brew concentrate with no cream and no sweetener — natural coffee flavors shine through. Smooth, refreshing, and packed with character.
+Short version: Nothing but pure cold brew. Clean, bold, smooth, and refreshingly different.
+Cold brew based, not espresso based. Our cold brew process creates a rich, full-bodied coffee with a clean finish and a stronger kick than traditional brewing methods.
+
 
 Soft Launch Promo (active — recommend to customers)
 
@@ -106,6 +121,18 @@ Extras / Add-ons
 
 
 Menu FAQ
+
+Q: What's the difference between Offbeat White and Offbeat Black?
+A: Both are cold brew based (not espresso). Offbeat Black is pure cold brew — no cream, no sweetener — clean, bold, and smooth. Offbeat White is the same signature cold brew concentrate blended with our house milk mixture — creamy, velvety, and balanced without bitterness. Choose Black for pure coffee character; choose White for creamy indulgence.
+
+Q: Are your drinks espresso-based? / Do you use espresso?
+A: No. Our Coffee Series drinks (Offbeat Black, Offbeat White, Offbeat Mocha, Offbeat Dulce) are made from our signature cold brew concentrate — cold brew based, not espresso based.
+
+Q: What beans do you use? / What coffee beans are in your drinks?
+A: We use quality, specially curated Arabica beans for our recipes.
+
+Q: What sweetener do you use? / What's in your milk mixture? / Recipe / ingredients (proprietary)
+A: That's proprietary information we're not able to share publicly — we appreciate your curiosity! We're happy to help with our menu, what's in each drink at a high level (see drink descriptions above), orders, and pickup or delivery.
 
 Q: What do you recommend? / Bestseller?
 A: Mention our Soft Launch Promo first if they haven't heard it: Buy 1, Get 1 at 50% OFF on Offbeat White (₱140 + second bottle ₱70) and Offbeat Black (₱130 + second bottle ₱65). Also recommend Offbeat White, Offbeat Black, Offbeat Mocha, or Offbeat Dulce from the Coffee Series.
