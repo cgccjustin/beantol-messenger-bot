@@ -112,6 +112,7 @@ const {
   filterAlternativesToInStock,
   buildTasteRecommendationInventoryHint,
 } = require("./lib/inventory-availability");
+const { requestChatCompletion, isTransientError } = require("./lib/openai-chat");
 const {
   listPipelineLeads,
   buildSalesContextNote,
@@ -593,11 +594,9 @@ function buildFilterRoastOnlySizeNote(senderId, userText) {
 }
 
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 90000);
-const OPENAI_REQUEST_RETRIES = Math.max(1, Number(process.env.OPENAI_REQUEST_RETRIES || 4));
 
 const openaiHttpsAgent = new https.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 30000,
+  keepAlive: false,
   timeout: OPENAI_TIMEOUT_MS,
 });
 
@@ -3085,13 +3084,18 @@ app.get("/admin/openai-test", async (req, res) => {
   }
 
   try {
-    const completion = await requestOpenAiChatCompletion([
-      { role: "system", content: "Reply with exactly: OpenAI OK" },
-      { role: "user", content: "ping" },
-    ]);
+    const { completion, transport } = await requestChatCompletion(OPENAI_API_KEY, {
+      model: OPENAI_MODEL,
+      messages: [
+        { role: "system", content: "Reply with exactly: OpenAI OK" },
+        { role: "user", content: "ping" },
+      ],
+      maxTokens: 50,
+    });
     res.json({
       ok: true,
       model: OPENAI_MODEL,
+      transport,
       reply: completion.choices[0]?.message?.content?.trim() || "",
     });
   } catch (err) {
@@ -3599,41 +3603,17 @@ function buildMinimalFallbackChatMessages(tenant, userText) {
 }
 
 function isTransientOpenAiError(err) {
-  const msg = String(err?.message || err?.cause?.message || "").toLowerCase();
-  const code = String(err?.code || err?.cause?.code || err?.status || "");
-  return (
-    /premature close|econnreset|etimedout|socket hang up|fetch failed|network|timeout|aborted/i.test(
-      msg
-    ) ||
-    /ERR_STREAM_PREMATURE_CLOSE|ECONNRESET|ETIMEDOUT|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT/i.test(
-      code
-    )
-  );
+  return isTransientError(err);
 }
 
 async function requestOpenAiChatCompletion(messages) {
-  let lastErr;
-  for (let attempt = 0; attempt < OPENAI_REQUEST_RETRIES; attempt++) {
-    try {
-      return await openai.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages,
-        max_tokens: 500,
-      });
-    } catch (err) {
-      lastErr = err;
-      if (!isTransientOpenAiError(err) || attempt >= OPENAI_REQUEST_RETRIES - 1) {
-        throw err;
-      }
-      const delayMs = 600 * 2 ** attempt;
-      console.warn(
-        `OpenAI transient error (attempt ${attempt + 1}/${OPENAI_REQUEST_RETRIES}), retry in ${delayMs}ms:`,
-        err.message
-      );
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-  throw lastErr;
+  const { completion } = await requestChatCompletion(OPENAI_API_KEY, {
+    model: OPENAI_MODEL,
+    messages,
+    maxTokens: 500,
+    timeoutMs: OPENAI_TIMEOUT_MS,
+  });
+  return completion;
 }
 
 async function handleMessage(senderId, userText, platform = "messenger", messageContext = {}) {
