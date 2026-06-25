@@ -1349,27 +1349,39 @@ async function sendAlertEmail({ subject, text, to }) {
     );
   }
 
+  // Resend: one API call with all recipients (avoids 2 req/sec rate limit on per-address sends)
+  if (provider === "resend") {
+    try {
+      const data = await sendResendEmail({ to: recipients, subject, text });
+      const sent = recipients.map((recipient) => ({ recipient, id: data.id }));
+      return {
+        provider,
+        id: data.id,
+        recipients,
+        sent,
+        failed: [],
+      };
+    } catch (err) {
+      throw new Error(err.message);
+    }
+  }
+
   const sent = [];
   const failed = [];
 
   for (const recipient of recipients) {
     try {
-      if (provider === "resend") {
-        const data = await sendResendEmail({ to: recipient, subject, text });
-        sent.push({ recipient, id: data.id });
-      } else {
-        const transporter = getMailTransporter();
-        if (!transporter) {
-          throw new Error("SMTP transporter unavailable.");
-        }
-        const info = await transporter.sendMail({
-          from: SMTP_FROM,
-          to: recipient,
-          subject,
-          text,
-        });
-        sent.push({ recipient, id: info.messageId });
+      const transporter = getMailTransporter();
+      if (!transporter) {
+        throw new Error("SMTP transporter unavailable.");
       }
+      const info = await transporter.sendMail({
+        from: SMTP_FROM,
+        to: recipient,
+        subject,
+        text,
+      });
+      sent.push({ recipient, id: info.messageId });
     } catch (err) {
       failed.push({ recipient, error: err.message });
       console.error(`Alert email failed for ${recipient}:`, err.message);
