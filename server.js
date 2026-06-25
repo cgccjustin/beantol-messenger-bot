@@ -41,6 +41,7 @@ const {
   isShopClosedFulfillmentIntent,
   buildShopClosedFulfillmentReply,
 } = require("./lib/shop-hours-inquiry");
+const { isWhoIsFaqInquiry, buildWhoIsFaqReply } = require("./lib/knowledge-faq-inquiry");
 const {
   messageHasImageAttachment,
   resolvePaymentProofSubmission,
@@ -4655,6 +4656,18 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     });
     await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
     return;
+  }
+
+  if (isWhoIsFaqInquiry(userText)) {
+    const reply = buildWhoIsFaqReply(tenant, userText);
+    if (reply) {
+      captureLeadFromMessage(senderId, userText, platform, {
+        interest: "fun facts",
+        stage: "browsing",
+      });
+      await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
+      return;
+    }
   }
 
   if (getGcashQrUrl(tenant) && (isGcashOrPaymentInquiry(userText) || isQrCodeRequest(userText))) {
