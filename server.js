@@ -210,11 +210,11 @@ const {
   escapeHtml,
   adminUrl,
   renderPage,
-  renderTenantSwitcher,
   renderToolCard,
   optionTags,
   statCards,
   archiveCheckbox,
+  tenantQuery,
 } = require("./lib/admin-ui");
 
 const app = express();
@@ -2008,6 +2008,59 @@ async function runAdminWithTenant(req, fn) {
   return runWithTenant(resolved.tenant, fn);
 }
 
+function adminTenantId(req) {
+  return resolveAdminTenant(req).tenant?.id || "";
+}
+
+function adminTenantQuery(req) {
+  const tid = req.query.tenant || req.body?.tenant || adminTenantId(req);
+  return tid ? tenantQuery(String(tid)) : "";
+}
+
+function adminRedirect(path, req, params = {}) {
+  const qs = new URLSearchParams({ token: adminToken(req) });
+  const tid = req.query.tenant || req.body?.tenant || adminTenantId(req);
+  if (tid) qs.set("tenant", String(tid));
+  for (const [k, v] of Object.entries(params)) {
+    if (v != null && v !== "") qs.set(k, String(v));
+  }
+  return `${path}?${qs.toString()}`;
+}
+
+function ensureAdminTenantInUrl(req, res) {
+  if (listTenants().length <= 1) return true;
+  if (req.query.tenant) {
+    const t = getTenantById(String(req.query.tenant));
+    if (!t) {
+      res.status(400).type("html").send(`<p>Unknown tenant: ${escapeHtml(String(req.query.tenant))}</p>`);
+      return false;
+    }
+    return true;
+  }
+  const def = getDefaultTenant();
+  if (!def?.id) return true;
+  const qs = new URLSearchParams(req.query);
+  qs.set("tenant", def.id);
+  res.redirect(`${req.path}?${qs.toString()}`);
+  return false;
+}
+
+function tenantHiddenInput(req) {
+  const tid = req.query.tenant || req.body?.tenant || adminTenantId(req);
+  if (!tid) return "";
+  return `<input type="hidden" name="tenant" value="${escapeHtml(String(tid))}">`;
+}
+
+function adminPageArgs(req, token, extra = {}) {
+  return {
+    req,
+    token,
+    tenants: listTenants(),
+    tenantId: adminTenantId(req),
+    ...extra,
+  };
+}
+
 function getPublicBaseUrl(req) {
   if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
   if (!req) return "";
@@ -2184,9 +2237,11 @@ function adminFlash(req) {
 // --- Admin dashboard (bookmark on phone/PC) ---
 app.get("/admin", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
 
   const token = adminToken(req);
-  const handoffs = listActiveHandoffs();
+  const handoffs = handoffsForAdmin(req);
+  const tq = adminTenantQuery(req);
   const meta = await fetchPageInstagramStatus();
   let webhookSubHtml = "";
   try {
@@ -2194,8 +2249,8 @@ app.get("/admin", async (req, res) => {
     const fields = [...extractSubscribedFieldsFromStatus(subStatus)].sort().join(", ") || "unknown";
     const echoesOn = hasMessageEchoesSubscription(subStatus);
     webhookSubHtml = echoesOn
-      ? `<p class="muted"><strong>Webhook:</strong> message_echoes <span style="color:#0a7">on</span> (${escapeHtml(fields)}) — admin replies should arrive with <code>app_id=${META_PAGE_INBOX_APP_ID}</code>. <a href="/admin/webhook-log?token=${encodeURIComponent(token)}">Webhook debug log →</a></p>`
-      : `<div class="alert-warn"><strong>Webhook:</strong> <code>message_echoes</code> is <strong>not</strong> subscribed via API (${escapeHtml(fields)}). Enable it in <a href="https://developers.facebook.com/" target="_blank" rel="noopener">Meta Developer</a> → Webhooks → your Page, then <a href="/admin/subscribe-webhooks?token=${encodeURIComponent(token)}">re-subscribe</a>. <a href="/admin/webhook-log?token=${encodeURIComponent(token)}">Debug log →</a></div>`;
+      ? `<p class="muted"><strong>Webhook:</strong> message_echoes <span style="color:#0a7">on</span> (${escapeHtml(fields)}) — admin replies should arrive with <code>app_id=${META_PAGE_INBOX_APP_ID}</code>. <a href="/admin/webhook-log?token=${encodeURIComponent(token)}${tq}">Webhook debug log →</a></p>`
+      : `<div class="alert-warn"><strong>Webhook:</strong> <code>message_echoes</code> is <strong>not</strong> subscribed via API (${escapeHtml(fields)}). Enable it in <a href="https://developers.facebook.com/" target="_blank" rel="noopener">Meta Developer</a> → Webhooks → your Page, then <a href="/admin/subscribe-webhooks?token=${encodeURIComponent(token)}">re-subscribe</a>. <a href="/admin/webhook-log?token=${encodeURIComponent(token)}${tq}">Debug log →</a></div>`;
   } catch (_) {
     webhookSubHtml = `<p class="muted"><strong>Webhook:</strong> could not check subscription — set <code>PAGE_ID</code> on Render.</p>`;
   }
@@ -2205,46 +2260,62 @@ app.get("/admin", async (req, res) => {
   let recentQuotes = 0;
   let lowStockAlert = "";
 
-  if (isLeadCaptureConfigured()) {
-    try {
-      const leadData = await listLeads(100);
-      newLeads = (leadData.leads || []).filter(
-        (l) => (l.teamStatus || "New") === "New"
-      ).length;
-    } catch (_) {
-      /* overview still loads */
-    }
-  }
-  if (isOrderCaptureConfigured()) {
-    try {
-      const orderData = await listOrders(100);
-      activeOrders = (orderData.orders || []).filter(
-        (o) => !["completed", "cancelled"].includes(String(o.orderStatus).toLowerCase())
-      ).length;
-    } catch (_) {
-      /* overview still loads */
-    }
-  }
-  if (isQuoteCaptureConfigured()) {
-    try {
-      const quoteData = await listQuotes(20);
-      recentQuotes = quoteData.count || 0;
-    } catch (_) {
-      /* overview still loads */
-    }
-  }
-  if (isInventorySheetConfigured()) {
-    try {
-      const inv = await listInventory();
-      const low = (inv.lowStock || []).filter(
-        (name) => !(inv.unavailable || []).includes(name)
-      );
-      if (low.length) {
-        lowStockAlert = `<div class="alert-warn"><strong>Low stock:</strong> ${escapeHtml(low.join(", "))} — <a href="/admin/inventory/view?token=${encodeURIComponent(token)}">Inventory</a></div>`;
+  try {
+    await runAdminWithTenant(req, async () => {
+      if (isLeadCaptureConfigured()) {
+        try {
+          const leadData = await listLeads(100);
+          newLeads = (leadData.leads || []).filter(
+            (l) => (l.teamStatus || "New") === "New"
+          ).length;
+        } catch (_) {
+          /* overview still loads */
+        }
       }
-    } catch (_) {
-      /* overview still loads */
-    }
+      if (isOrderCaptureConfigured()) {
+        try {
+          const orderData = await listOrders(100);
+          activeOrders = (orderData.orders || []).filter(
+            (o) => !["completed", "cancelled"].includes(String(o.orderStatus).toLowerCase())
+          ).length;
+        } catch (_) {
+          /* overview still loads */
+        }
+      }
+      if (isQuoteCaptureConfigured()) {
+        try {
+          const quoteData = await listQuotes(20);
+          recentQuotes = quoteData.count || 0;
+        } catch (_) {
+          /* overview still loads */
+        }
+      }
+      if (isInventorySheetConfigured()) {
+        try {
+          const inv = await listInventory();
+          const low = (inv.lowStock || []).filter(
+            (name) => !(inv.unavailable || []).includes(name)
+          );
+          if (low.length) {
+            lowStockAlert = `<div class="alert-warn"><strong>Low stock:</strong> ${escapeHtml(low.join(", "))} — <a href="/admin/inventory/view?token=${encodeURIComponent(token)}${tq}">Inventory</a></div>`;
+          }
+        } catch (_) {
+          /* overview still loads */
+        }
+      }
+    });
+  } catch (err) {
+    return res.status(400).type("html").send(
+      renderPage({
+        ...adminPageArgs(req, token, {
+          title: "Ops overview",
+          active: "overview",
+          body: `<p>${escapeHtml(err.message)}</p>`,
+          flash: adminFlash(req),
+          bookmark: true,
+        }),
+      })
+    );
   }
 
   let metaHtml;
@@ -2283,21 +2354,29 @@ ${handoffTable || "<p>No active handoffs.</p>"}`;
 
   res.type("html").send(
     renderPage({
-      title: "Ops overview",
-      active: "overview",
-      token,
-      body,
-      flash: adminFlash(req),
-      bookmark: true,
-      req,
+      ...adminPageArgs(req, token, {
+        title: "Ops overview",
+        active: "overview",
+        body,
+        flash: adminFlash(req),
+        bookmark: true,
+      }),
     })
   );
 });
 
+function handoffsForAdmin(req) {
+  const all = listActiveHandoffs();
+  if (listTenants().length <= 1) return all;
+  const tid = adminTenantId(req);
+  return tid ? all.filter((h) => h.tenantId === tid) : all;
+}
+
 app.get("/admin/handoffs/view", (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  const handoffs = listActiveHandoffs();
+  const handoffs = handoffsForAdmin(req);
   const pausedCount = handoffs.filter((h) => h.aiPaused).length;
   const awaitingCount = handoffs.filter((h) => h.mode === "agent_requested").length;
 
@@ -2313,19 +2392,21 @@ ${renderHandoffsByPlatformHtml(handoffs, req)}`;
 
   res.type("html").send(
     renderPage({
-      title: "Handoffs — Messenger & Instagram",
-      active: "handoffs",
-      token,
-      body,
-      flash: adminFlash(req),
+      ...adminPageArgs(req, token, {
+        title: "Handoffs — Messenger & Instagram",
+        active: "handoffs",
+        body,
+        flash: adminFlash(req),
+      }),
     })
   );
 });
 
 app.get("/admin/instagram-setup/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  const u = (path) => adminUrl(path, token);
+  const u = (path) => adminUrl(path, token) + adminTenantQuery(req);
   const meta = await fetchPageInstagramStatus();
   let subFields = "unknown";
   let echoesOn = false;
@@ -2380,18 +2461,20 @@ ${statCards({
 
   res.type("html").send(
     renderPage({
-      title: "Instagram setup",
-      active: "instagram",
-      token,
-      body,
+      ...adminPageArgs(req, token, {
+        title: "Instagram setup",
+        active: "instagram",
+        body,
+      }),
     })
   );
 });
 
 app.get("/admin/tools/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  const u = (path) => adminUrl(path, token);
+  const u = (path) => adminUrl(path, token) + adminTenantQuery(req);
 
   const body = `<p class="muted">API tools open in a new tab. Use the tabs above for day-to-day ops.</p>
 <div class="grid-2">
@@ -2409,52 +2492,58 @@ ${renderToolCard("Handoffs JSON", "List active handoffs (API).", u("/admin/hando
 
   res.type("html").send(
     renderPage({
-      title: "Admin tools",
-      active: "tools",
-      token,
-      body,
+      ...adminPageArgs(req, token, {
+        title: "Admin tools",
+        active: "tools",
+        body,
+      }),
     })
   );
 });
 
 app.get("/admin/analytics/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
 
   try {
-    const [leadData, orderData, quoteData, eventData, invData] = await Promise.all([
-      isLeadCaptureConfigured() ? listLeads(200) : { leads: [] },
-      isOrderCaptureConfigured() ? listOrders(200) : { orders: [] },
-      isQuoteCaptureConfigured() ? listQuotes(200) : { quotes: [] },
-      isEventsLogConfigured() ? listEvents(1000) : { events: [] },
-      isInventorySheetConfigured() ? listInventory() : { items: [] },
-    ]);
+    const stats = await runAdminWithTenant(req, async () => {
+      const [leadData, orderData, quoteData, eventData, invData] = await Promise.all([
+        isLeadCaptureConfigured() ? listLeads(200) : { leads: [] },
+        isOrderCaptureConfigured() ? listOrders(200) : { orders: [] },
+        isQuoteCaptureConfigured() ? listQuotes(200) : { quotes: [] },
+        isEventsLogConfigured() ? listEvents(1000) : { events: [] },
+        isInventorySheetConfigured() ? listInventory() : { items: [] },
+      ]);
 
-    const stats = computeAnalytics({
-      leads: leadData.leads || [],
-      orders: orderData.orders || [],
-      quotes: quoteData.quotes || [],
-      events: eventData.events || [],
-      inventory: invData.items || [],
-      handoffCount: listActiveHandoffs().length,
+      return computeAnalytics({
+        leads: leadData.leads || [],
+        orders: orderData.orders || [],
+        quotes: quoteData.quotes || [],
+        events: eventData.events || [],
+        inventory: invData.items || [],
+        handoffCount: handoffsForAdmin(req).length,
+      });
     });
 
     res.type("html").send(
       renderPage({
-        title: "Analytics",
-        active: "analytics",
-        token,
-        body: renderAnalyticsHtml(stats),
-        flash: adminFlash(req),
+        ...adminPageArgs(req, token, {
+          title: "Analytics",
+          active: "analytics",
+          body: renderAnalyticsHtml(stats),
+          flash: adminFlash(req),
+        }),
       })
     );
   } catch (err) {
     res.status(500).type("html").send(
       renderPage({
-        title: "Analytics",
-        active: "analytics",
-        token,
-        body: `<p>Could not load analytics: ${escapeHtml(err.message)}</p>`,
+        ...adminPageArgs(req, token, {
+          title: "Analytics",
+          active: "analytics",
+          body: `<p>Could not load analytics: ${escapeHtml(err.message)}</p>`,
+        }),
       })
     );
   }
@@ -2463,22 +2552,24 @@ app.get("/admin/analytics/view", async (req, res) => {
 app.get("/admin/analytics", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const [leadData, orderData, quoteData, eventData, invData] = await Promise.all([
-      isLeadCaptureConfigured() ? listLeads(200) : { leads: [] },
-      isOrderCaptureConfigured() ? listOrders(200) : { orders: [] },
-      isQuoteCaptureConfigured() ? listQuotes(200) : { quotes: [] },
-      isEventsLogConfigured() ? listEvents(1000) : { events: [] },
-      isInventorySheetConfigured() ? listInventory() : { items: [] },
-    ]);
-    const stats = computeAnalytics({
-      leads: leadData.leads || [],
-      orders: orderData.orders || [],
-      quotes: quoteData.quotes || [],
-      events: eventData.events || [],
-      inventory: invData.items || [],
-      handoffCount: listActiveHandoffs().length,
+    const stats = await runAdminWithTenant(req, async () => {
+      const [leadData, orderData, quoteData, eventData, invData] = await Promise.all([
+        isLeadCaptureConfigured() ? listLeads(200) : { leads: [] },
+        isOrderCaptureConfigured() ? listOrders(200) : { orders: [] },
+        isQuoteCaptureConfigured() ? listQuotes(200) : { quotes: [] },
+        isEventsLogConfigured() ? listEvents(1000) : { events: [] },
+        isInventorySheetConfigured() ? listInventory() : { items: [] },
+      ]);
+      return computeAnalytics({
+        leads: leadData.leads || [],
+        orders: orderData.orders || [],
+        quotes: quoteData.quotes || [],
+        events: eventData.events || [],
+        inventory: invData.items || [],
+        handoffCount: handoffsForAdmin(req).length,
+      });
     });
-    res.json({ ok: true, ...stats });
+    res.json({ ok: true, tenantId: adminTenantId(req), ...stats });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2486,36 +2577,43 @@ app.get("/admin/analytics", async (req, res) => {
 
 app.get("/admin/sales/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  if (!isLeadCaptureConfigured()) {
-    return res.status(400).type("html").send(
-      renderPage({
-        title: "Sales pipeline",
-        active: "sales",
-        token,
-        body: "<p>Lead capture not configured.</p>",
-      })
-    );
-  }
   try {
-    const data = await listLeads(200);
-    const pipeline = listPipelineLeads(data.leads || []);
+    const pipeline = await runAdminWithTenant(req, async () => {
+      if (!isLeadCaptureConfigured()) return null;
+      const data = await listLeads(200);
+      return listPipelineLeads(data.leads || []);
+    });
+    if (!pipeline) {
+      return res.status(400).type("html").send(
+        renderPage({
+          ...adminPageArgs(req, token, {
+            title: "Sales pipeline",
+            active: "sales",
+            body: "<p>Lead capture not configured for this shop.</p>",
+          }),
+        })
+      );
+    }
     res.type("html").send(
       renderPage({
-        title: "Sales pipeline",
-        active: "sales",
-        token,
-        body: renderSalesPipelineHtml(pipeline, token),
-        flash: adminFlash(req),
+        ...adminPageArgs(req, token, {
+          title: "Sales pipeline",
+          active: "sales",
+          body: renderSalesPipelineHtml(pipeline, token, adminTenantId(req)),
+          flash: adminFlash(req),
+        }),
       })
     );
   } catch (err) {
     res.status(500).type("html").send(
       renderPage({
-        title: "Sales pipeline",
-        active: "sales",
-        token,
-        body: `<p>Could not load pipeline: ${escapeHtml(err.message)}</p>`,
+        ...adminPageArgs(req, token, {
+          title: "Sales pipeline",
+          active: "sales",
+          body: `<p>Could not load pipeline: ${escapeHtml(err.message)}</p>`,
+        }),
       })
     );
   }
@@ -2523,62 +2621,59 @@ app.get("/admin/sales/view", async (req, res) => {
 
 app.get("/admin/sales/check-stale", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
   if (!isEmailConfigured()) {
-    return res.redirect(
-      `/admin/sales/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent("Email not configured")}`
-    );
+    return res.redirect(adminRedirect("/admin/sales/view", req, { error: "Email not configured" }));
   }
   try {
-    const data = await listLeads(200);
-    const { stale } = listPipelineLeads(data.leads || []);
+    const stale = await runAdminWithTenant(req, async () => {
+      if (!isLeadCaptureConfigured()) return [];
+      const data = await listLeads(200);
+      return listPipelineLeads(data.leads || []).stale;
+    });
     if (!stale.length) {
-      return res.redirect(
-        `/admin/sales/view?token=${encodeURIComponent(token)}&saved=1`
-      );
+      return res.redirect(adminRedirect("/admin/sales/view", req, { saved: "1" }));
     }
+    const tenant = resolveAdminTenant(req).tenant;
     await sendAlertEmail({
-      to: getNotifyRecipients("lead", getActiveTenant()),
-      subject: `Beantol — ${stale.length} lead(s) need follow-up`,
+      to: getNotifyRecipients("lead", tenant),
+      subject: `${tenant?.name || "Shop"} — ${stale.length} lead(s) need follow-up`,
       text: [
         "These leads have not progressed in 3+ days:",
         "",
         formatStaleLeadsEmail(stale),
         "",
         PUBLIC_BASE_URL && ADMIN_SECRET
-          ? `Sales pipeline: ${PUBLIC_BASE_URL}/admin/sales/view?token=${encodeURIComponent(ADMIN_SECRET)}`
+          ? `Sales pipeline: ${PUBLIC_BASE_URL}/admin/sales/view?token=${encodeURIComponent(ADMIN_SECRET)}${tenantQuery(tenant?.id || "")}`
           : "",
       ]
         .filter(Boolean)
         .join("\n"),
     });
-    res.redirect(`/admin/sales/view?token=${encodeURIComponent(token)}&saved=1`);
+    res.redirect(adminRedirect("/admin/sales/view", req, { saved: "1" }));
   } catch (err) {
-    res.redirect(
-      `/admin/sales/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
-    );
+    res.redirect(adminRedirect("/admin/sales/view", req, { error: err.message }));
   }
 });
 
 app.get("/admin/appointments/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  if (!isAppointmentCaptureConfigured()) {
-    return res.status(400).type("html").send(
-      renderPage({
-        title: "Appointments",
-        active: "appointments",
-        token,
-        body: "<p>Appointments use the same Google Sheet — <strong>Appointments</strong> tab is created on first booking.</p>",
-      })
-    );
-  }
   try {
-    const data = await listAppointments(50);
-    const rows = (data.appointments || [])
-      .map((ap) => {
-        const action = `/admin/appointments/${encodeURIComponent(ap.appointmentId)}/update?token=${encodeURIComponent(token)}`;
-        return `<tr>
+    const body = await runAdminWithTenant(req, async () => {
+      if (!isAppointmentCaptureConfigured()) {
+        const tenant = getActiveTenant();
+        const name = tenant?.name || tenant?.id || "this shop";
+        return `<p class="alert-warn">Appointments are not enabled for <strong>${escapeHtml(name)}</strong>.</p>`;
+      }
+      const data = await listAppointments(50);
+      const tq = adminTenantQuery(req);
+      const rows = (data.appointments || [])
+        .map((ap) => {
+          const action = `/admin/appointments/${encodeURIComponent(ap.appointmentId)}/update?token=${encodeURIComponent(token)}${tq}`;
+          return `<tr>
           <td><code>${escapeHtml(ap.appointmentId)}</code></td>
           <td>${escapeHtml((ap.created || "").slice(0, 16))}</td>
           <td>${escapeHtml(ap.name || "—")}</td>
@@ -2587,32 +2682,36 @@ app.get("/admin/appointments/view", async (req, res) => {
           <td>${escapeHtml(ap.phone || "—")}</td>
           <td>
             <form class="inline-form" method="post" action="${action}">
+              ${tenantHiddenInput(req)}
               <select name="status">${optionTags(APPOINTMENT_STATUSES, ap.status || "requested")}</select>
               <input name="notes" placeholder="Notes" value="${escapeHtml(ap.notes || "")}">
               <button class="btn btn-sm" type="submit">Save</button>
             </form>
           </td>
         </tr>`;
-      })
-      .join("");
-    const body = `<p class="muted">Shop visits, cupping, and callbacks booked via chat. Mon–Fri shop hours — confirm with customer in Messenger.</p>
+        })
+        .join("");
+      return `<p class="muted">Shop visits, cupping, and callbacks booked via chat. Mon–Fri shop hours — confirm with customer in Messenger.</p>
 ${rows ? `<table><tr><th>ID</th><th>Created</th><th>Name</th><th>Type</th><th>When</th><th>Phone</th><th>Status</th></tr>${rows}</table>` : "<p>No appointments yet. Customer can say \"book a shop visit\" in chat.</p>"}`;
+    });
     res.type("html").send(
       renderPage({
-        title: "Appointments",
-        active: "appointments",
-        token,
-        body,
-        flash: adminFlash(req),
+        ...adminPageArgs(req, token, {
+          title: "Appointments",
+          active: "appointments",
+          body,
+          flash: adminFlash(req),
+        }),
       })
     );
   } catch (err) {
     res.status(500).type("html").send(
       renderPage({
-        title: "Appointments",
-        active: "appointments",
-        token,
-        body: `<p>Could not load appointments: ${escapeHtml(err.message)}</p>`,
+        ...adminPageArgs(req, token, {
+          title: "Appointments",
+          active: "appointments",
+          body: `<p>Could not load appointments: ${escapeHtml(err.message)}</p>`,
+        }),
       })
     );
   }
@@ -2620,65 +2719,58 @@ ${rows ? `<table><tr><th>ID</th><th>Created</th><th>Name</th><th>Type</th><th>Wh
 
 app.post("/admin/appointments/:appointmentId/update", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const token = adminToken(req);
   try {
-    const result = await updateAppointmentStatus(
-      req.params.appointmentId,
-      req.body.status,
-      req.body.notes
+    const result = await runAdminWithTenant(req, () =>
+      updateAppointmentStatus(req.params.appointmentId, req.body.status, req.body.notes)
     );
     if (!result?.ok) {
       return res.redirect(
-        `/admin/appointments/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+        adminRedirect("/admin/appointments/view", req, { error: result?.reason || "Update failed" })
       );
     }
-    res.redirect(`/admin/appointments/view?token=${encodeURIComponent(token)}&saved=1`);
+    res.redirect(adminRedirect("/admin/appointments/view", req, { saved: "1" }));
   } catch (err) {
-    res.redirect(
-      `/admin/appointments/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
-    );
+    res.redirect(adminRedirect("/admin/appointments/view", req, { error: err.message }));
   }
 });
 
 app.get("/admin/leads/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  if (!isLeadCaptureConfigured()) {
-    return res.status(400).type("html").send(
-      renderPage({
-        title: "Leads",
-        active: "leads",
-        token,
-        body: "<p>Lead capture not configured. Set GOOGLE_LEADS_SHEET_ID on Render.</p>",
-      })
-    );
-  }
 
   try {
-    const statusFilter = req.query.status || "";
-    const showArchived = req.query.archived === "1";
-    const limit = Math.min(Number(req.query.limit) || 100, 200);
-    const data = await listLeads(limit);
-    let leads = data.leads || [];
-    if (!showArchived) {
-      leads = leads.filter((l) => !ARCHIVED_LEAD_STATUSES.has(l.teamStatus || "New"));
-    }
-    if (statusFilter) {
-      leads = leads.filter((l) => (l.teamStatus || "New") === statusFilter);
-    }
+    const body = await runAdminWithTenant(req, async () => {
+      if (!isLeadCaptureConfigured()) {
+        return "<p>Lead capture not configured for this shop.</p>";
+      }
 
-    const filterForm = `<form class="filters" method="get">
+      const statusFilter = req.query.status || "";
+      const showArchived = req.query.archived === "1";
+      const limit = Math.min(Number(req.query.limit) || 100, 200);
+      const data = await listLeads(limit);
+      let leads = data.leads || [];
+      if (!showArchived) {
+        leads = leads.filter((l) => !ARCHIVED_LEAD_STATUSES.has(l.teamStatus || "New"));
+      }
+      if (statusFilter) {
+        leads = leads.filter((l) => (l.teamStatus || "New") === statusFilter);
+      }
+
+      const filterForm = `<form class="filters" method="get">
 <input type="hidden" name="token" value="${escapeHtml(token)}">
+${tenantHiddenInput(req)}
 <label>Team status <select name="status"><option value="">All</option>${optionTags(TEAM_STATUSES, statusFilter)}</select></label>
 ${archiveCheckbox("archived", showArchived, "Show Won / Lost")}
 <button class="btn btn-sm" type="submit">Filter</button>
-<a class="muted" href="/admin/leads?token=${encodeURIComponent(token)}">JSON API</a>
+<a class="muted" href="/admin/leads?token=${encodeURIComponent(token)}${adminTenantQuery(req)}">JSON API</a>
 </form>`;
 
-    const rows = leads
-      .map((lead) => {
-        const action = `/admin/leads/${encodeURIComponent(lead.senderId)}/update?token=${encodeURIComponent(token)}`;
-        return `<tr>
+      const tq = adminTenantQuery(req);
+      const rows = leads
+        .map((lead) => {
+          const action = `/admin/leads/${encodeURIComponent(lead.senderId)}/update?token=${encodeURIComponent(token)}${tq}`;
+          return `<tr>
           <td>${escapeHtml((lead.updated || lead.created || "").slice(0, 16))}</td>
           <td>${escapeHtml(lead.name || "—")}</td>
           <td>${escapeHtml(lead.stage || "—")}</td>
@@ -2686,6 +2778,7 @@ ${archiveCheckbox("archived", showArchived, "Show Won / Lost")}
           <td>${escapeHtml(lead.phone || "—")}</td>
           <td>
             <form class="inline-form" method="post" action="${action}">
+              ${tenantHiddenInput(req)}
               <select name="teamStatus">${optionTags(TEAM_STATUSES, lead.teamStatus || "New")}</select>
               <input name="assignedTo" placeholder="Assigned" value="${escapeHtml(lead.assignedTo || "")}">
               <details class="row-edit"><summary>Notes</summary>
@@ -2696,23 +2789,32 @@ ${archiveCheckbox("archived", showArchived, "Show Won / Lost")}
             </form>
           </td>
         </tr>`;
-      })
-      .join("");
+        })
+        .join("");
 
-    const body = `${filterForm}
+      return `${filterForm}
 <p class="muted">Showing ${leads.length} lead(s)${showArchived ? "" : " (hiding Won / Lost)"}. Updates sync to Google Sheet.</p>
 ${rows ? `<table><tr><th>Updated</th><th>Name</th><th>Bot stage</th><th>Interest</th><th>Phone</th><th>Team fields</th></tr>${rows}</table>` : "<p>No leads match this filter.</p>"}`;
+    });
 
     res.type("html").send(
-      renderPage({ title: "Leads", active: "leads", token, body, flash: adminFlash(req) })
+      renderPage({
+        ...adminPageArgs(req, token, {
+          title: "Leads",
+          active: "leads",
+          body,
+          flash: adminFlash(req),
+        }),
+      })
     );
   } catch (err) {
     res.status(500).type("html").send(
       renderPage({
-        title: "Leads",
-        active: "leads",
-        token,
-        body: `<p>Could not load leads: ${escapeHtml(err.message)}</p>`,
+        ...adminPageArgs(req, token, {
+          title: "Leads",
+          active: "leads",
+          body: `<p>Could not load leads: ${escapeHtml(err.message)}</p>`,
+        }),
       })
     );
   }
@@ -2720,79 +2822,77 @@ ${rows ? `<table><tr><th>Updated</th><th>Name</th><th>Bot stage</th><th>Interest
 
 app.post("/admin/leads/:senderId/update", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const token = adminToken(req);
   try {
-    const result = await updateLeadTeamFields(req.params.senderId, {
-      teamStatus: req.body.teamStatus,
-      assignedTo: req.body.assignedTo,
-      notes: req.body.notes,
-      nextAction: req.body.nextAction,
-    });
+    const result = await runAdminWithTenant(req, () =>
+      updateLeadTeamFields(req.params.senderId, {
+        teamStatus: req.body.teamStatus,
+        assignedTo: req.body.assignedTo,
+        notes: req.body.notes,
+        nextAction: req.body.nextAction,
+      })
+    );
     if (!result?.ok) {
       return res.redirect(
-        `/admin/leads/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+        adminRedirect("/admin/leads/view", req, { error: result?.reason || "Update failed" })
       );
     }
-    res.redirect(`/admin/leads/view?token=${encodeURIComponent(token)}&saved=1`);
+    res.redirect(adminRedirect("/admin/leads/view", req, { saved: "1" }));
   } catch (err) {
-    res.redirect(
-      `/admin/leads/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
-    );
+    res.redirect(adminRedirect("/admin/leads/view", req, { error: err.message }));
   }
 });
 
 app.get("/admin/orders/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  if (!isOrderCaptureConfigured()) {
-    return res.status(400).type("html").send(
-      renderPage({
-        title: "Orders",
-        active: "orders",
-        token,
-        body: "<p>Order capture not configured.</p>",
-      })
-    );
-  }
 
   try {
-    const statusFilter = (req.query.status || "").toLowerCase();
-    const showArchived = req.query.archived === "1";
-    const limit = Math.min(Number(req.query.limit) || 100, 200);
-    const data = await listOrders(limit);
-    let orders = data.orders || [];
-    if (!showArchived) {
-      orders = orders.filter(
-        (o) => !ARCHIVED_ORDER_STATUSES.has(String(o.orderStatus || "").toLowerCase())
-      );
-    }
-    if (statusFilter) {
-      orders = orders.filter(
-        (o) => String(o.orderStatus || "").toLowerCase() === statusFilter
-      );
-    }
+    const body = await runAdminWithTenant(req, async () => {
+      if (!isOrderCaptureConfigured()) {
+        return "<p>Order capture not configured for this shop.</p>";
+      }
 
-    const filterForm = `<form class="filters" method="get">
+      const statusFilter = (req.query.status || "").toLowerCase();
+      const showArchived = req.query.archived === "1";
+      const limit = Math.min(Number(req.query.limit) || 100, 200);
+      const data = await listOrders(limit);
+      let orders = data.orders || [];
+      if (!showArchived) {
+        orders = orders.filter(
+          (o) => !ARCHIVED_ORDER_STATUSES.has(String(o.orderStatus || "").toLowerCase())
+        );
+      }
+      if (statusFilter) {
+        orders = orders.filter(
+          (o) => String(o.orderStatus || "").toLowerCase() === statusFilter
+        );
+      }
+
+      const filterForm = `<form class="filters" method="get">
 <input type="hidden" name="token" value="${escapeHtml(token)}">
+${tenantHiddenInput(req)}
 <label>Order status <select name="status"><option value="">All</option>${optionTags(ADMIN_ORDER_STATUSES, statusFilter)}</select></label>
 ${archiveCheckbox("archived", showArchived, "Show completed / cancelled")}
 <button class="btn btn-sm" type="submit">Filter</button>
-<a class="muted" href="/admin/orders?token=${encodeURIComponent(token)}">JSON API</a>
+<a class="muted" href="/admin/orders?token=${encodeURIComponent(token)}${adminTenantQuery(req)}">JSON API</a>
 </form>`;
 
-    const rows = orders
-      .map((order) => {
-        const action = `/admin/orders/${encodeURIComponent(order.orderId)}/update?token=${encodeURIComponent(token)}`;
-        const productCell = order.lineItems
-          ? `<span style="font-size:13px">${escapeHtml(order.lineItems.replace(/ · /g, " · "))}</span>${order.subtotal ? `<br><strong>${escapeHtml(formatPeso(order.subtotal))}</strong>` : ""}`
-          : escapeHtml([order.bean, order.size].filter(Boolean).join(" ") || "—");
-        return `<tr>
+      const tq = adminTenantQuery(req);
+      const rows = orders
+        .map((order) => {
+          const action = `/admin/orders/${encodeURIComponent(order.orderId)}/update?token=${encodeURIComponent(token)}${tq}`;
+          const productCell = order.lineItems
+            ? `<span style="font-size:13px">${escapeHtml(order.lineItems.replace(/ · /g, " · "))}</span>${order.subtotal ? `<br><strong>${escapeHtml(formatPeso(order.subtotal))}</strong>` : ""}`
+            : escapeHtml([order.bean, order.size].filter(Boolean).join(" ") || "—");
+          return `<tr>
           <td><code>${escapeHtml(order.orderId)}</code></td>
           <td>${escapeHtml(order.name || "—")}</td>
           <td>${productCell}</td>
           <td>${escapeHtml(order.phone || "—")}</td>
           <td>
             <form class="inline-form" method="post" action="${action}">
+              ${tenantHiddenInput(req)}
               <select name="orderStatus">${optionTags(ADMIN_ORDER_STATUSES, order.orderStatus || "inquiry")}</select>
               <select name="paymentStatus"><option value="unpaid"${order.paymentStatus === "unpaid" ? " selected" : ""}>unpaid</option><option value="paid"${order.paymentStatus === "paid" ? " selected" : ""}>paid</option></select>
               <textarea name="notes" placeholder="Notes">${escapeHtml(order.notes || "")}</textarea>
@@ -2800,23 +2900,32 @@ ${archiveCheckbox("archived", showArchived, "Show completed / cancelled")}
             </form>
           </td>
         </tr>`;
-      })
-      .join("");
+        })
+        .join("");
 
-    const body = `${filterForm}
+      return `${filterForm}
 <p class="muted">Showing ${orders.length} order(s)${showArchived ? "" : " (hiding completed / cancelled)"}.</p>
 ${rows ? `<table><tr><th>Order ID</th><th>Name</th><th>Product</th><th>Phone</th><th>Status & notes</th></tr>${rows}</table>` : "<p>No orders match this filter.</p>"}`;
+    });
 
     res.type("html").send(
-      renderPage({ title: "Orders", active: "orders", token, body, flash: adminFlash(req) })
+      renderPage({
+        ...adminPageArgs(req, token, {
+          title: "Orders",
+          active: "orders",
+          body,
+          flash: adminFlash(req),
+        }),
+      })
     );
   } catch (err) {
     res.status(500).type("html").send(
       renderPage({
-        title: "Orders",
-        active: "orders",
-        token,
-        body: `<p>Could not load orders: ${escapeHtml(err.message)}</p>`,
+        ...adminPageArgs(req, token, {
+          title: "Orders",
+          active: "orders",
+          body: `<p>Could not load orders: ${escapeHtml(err.message)}</p>`,
+        }),
       })
     );
   }
@@ -2824,46 +2933,43 @@ ${rows ? `<table><tr><th>Order ID</th><th>Name</th><th>Product</th><th>Phone</th
 
 app.post("/admin/orders/:orderId/update", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const token = adminToken(req);
   try {
-    const result = await updateOrderFields(req.params.orderId, {
-      orderStatus: req.body.orderStatus,
-      paymentStatus: req.body.paymentStatus,
-      notes: req.body.notes,
-    });
+    const result = await runAdminWithTenant(req, () =>
+      updateOrderFields(req.params.orderId, {
+        orderStatus: req.body.orderStatus,
+        paymentStatus: req.body.paymentStatus,
+        notes: req.body.notes,
+      })
+    );
     if (!result?.ok) {
       return res.redirect(
-        `/admin/orders/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+        adminRedirect("/admin/orders/view", req, { error: result?.reason || "Update failed" })
       );
     }
-    res.redirect(`/admin/orders/view?token=${encodeURIComponent(token)}&saved=1`);
+    res.redirect(adminRedirect("/admin/orders/view", req, { saved: "1" }));
   } catch (err) {
-    res.redirect(
-      `/admin/orders/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent(err.message)}`
-    );
+    res.redirect(adminRedirect("/admin/orders/view", req, { error: err.message }));
   }
 });
 
 app.get("/admin/quotes/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  if (!isQuoteCaptureConfigured()) {
-    return res.status(400).type("html").send(
-      renderPage({
-        title: "Quotes",
-        active: "quotes",
-        token,
-        body: "<p>Quote capture uses the same Google Sheet. Add a <strong>Quotes</strong> tab — it is created on first quote.</p>",
-      })
-    );
-  }
 
   try {
-    const data = await listQuotes(50);
-    const rows = (data.quotes || [])
-      .map((q) => {
-        const url = buildQuoteShareUrl(q);
-        return `<tr>
+    const body = await runAdminWithTenant(req, async () => {
+      if (!isQuoteCaptureConfigured()) {
+        const tenant = getActiveTenant();
+        const name = tenant?.name || tenant?.id || "this shop";
+        return `<p class="alert-warn">Quotes are not enabled for <strong>${escapeHtml(name)}</strong>.</p>`;
+      }
+
+      const data = await listQuotes(50);
+      const rows = (data.quotes || [])
+        .map((q) => {
+          const url = buildQuoteShareUrl(q);
+          return `<tr>
           <td><code>${escapeHtml(q.quoteId)}</code></td>
           <td>${escapeHtml((q.created || "").slice(0, 16))}</td>
           <td>${escapeHtml(q.name || "—")}</td>
@@ -2872,23 +2978,32 @@ app.get("/admin/quotes/view", async (req, res) => {
           <td>${escapeHtml(q.status || "—")}</td>
           <td>${url ? `<a href="${escapeHtml(url)}" target="_blank">View</a>` : "—"}</td>
         </tr>`;
-      })
-      .join("");
+        })
+        .join("");
 
-    const body = `<p class="muted">Formal quotes are auto-created when customers ask about prices. Share links open a printable page.</p>
-<a class="muted" href="/admin/quotes?token=${encodeURIComponent(token)}">JSON API</a>
+      return `<p class="muted">Formal quotes are auto-created when customers ask about prices. Share links open a printable page.</p>
+<a class="muted" href="/admin/quotes?token=${encodeURIComponent(token)}${adminTenantQuery(req)}">JSON API</a>
 ${rows ? `<table><tr><th>Quote ID</th><th>Created</th><th>Name</th><th>Items</th><th>Total</th><th>Status</th><th>Link</th></tr>${rows}</table>` : "<p>No quotes yet — ask the bot about a product price to generate one.</p>"}`;
+    });
 
     res.type("html").send(
-      renderPage({ title: "Quotes", active: "quotes", token, body, flash: adminFlash(req) })
+      renderPage({
+        ...adminPageArgs(req, token, {
+          title: "Quotes",
+          active: "quotes",
+          body,
+          flash: adminFlash(req),
+        }),
+      })
     );
   } catch (err) {
     res.status(500).type("html").send(
       renderPage({
-        title: "Quotes",
-        active: "quotes",
-        token,
-        body: `<p>Could not load quotes: ${escapeHtml(err.message)}</p>`,
+        ...adminPageArgs(req, token, {
+          title: "Quotes",
+          active: "quotes",
+          body: `<p>Could not load quotes: ${escapeHtml(err.message)}</p>`,
+        }),
       })
     );
   }
@@ -2896,9 +3011,9 @@ ${rows ? `<table><tr><th>Quote ID</th><th>Created</th><th>Name</th><th>Items</th
 
 app.get("/admin/inventory/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
-  const tenantParam = req.query.tenant ? String(req.query.tenant) : "";
-  const multiTenant = listTenants().length > 1;
+  const tq = adminTenantQuery(req);
   let sheetItems = [];
   let loadError = "";
   let invMeta = {};
@@ -2906,9 +3021,7 @@ app.get("/admin/inventory/view", async (req, res) => {
   let labels = [];
   let unknown = [];
 
-  if (multiTenant && !tenantParam) {
-    loadError = "";
-  } else if (isInventorySheetConfigured()) {
+  if (isInventorySheetConfigured()) {
     try {
       const inv = await runAdminWithTenant(req, () =>
         req.query.refresh === "1" ? refreshInventoryCache() : listInventory()
@@ -2930,16 +3043,15 @@ app.get("/admin/inventory/view", async (req, res) => {
       sheetItems = [];
     }
   } else {
-    ({ labels, unknown, source } = parseUnavailableProductLabels());
+    await runAdminWithTenant(req, async () => {
+      ({ labels, unknown, source } = parseUnavailableProductLabels());
+    }).catch(() => {
+      ({ labels, unknown, source } = parseUnavailableProductLabels());
+    });
   }
 
-  let body = renderTenantSwitcher(token, invMeta.tenantId || tenantParam, listTenants());
+  let body = "";
 
-  if (multiTenant && !tenantParam) {
-    body += `<div class="alert-warn"><strong>Select a shop above</strong> to view inventory. Each tenant has its own Google Sheet — opening Inventory without a shop shows nothing on purpose (avoids mixing Beantol and Offbeat).</div>`;
-  }
-
-  if (tenantParam || !multiTenant) {
   if (isInventorySheetConfigured()) {
     const tenantHint = invMeta.tenantId
       ? ` · tenant <strong>${escapeHtml(invMeta.tenantId)}</strong>`
@@ -2948,7 +3060,7 @@ app.get("/admin/inventory/view", async (req, res) => {
       body += `<div class="alert-warn"><strong>Inventory load failed:</strong> ${escapeHtml(loadError)}</div>`;
     }
     if (invMeta.wrongCatalog) {
-      body += `<div class="alert-warn"><strong>Wrong products detected</strong> — this sheet has Beantol roast SKUs but you are viewing <strong>${escapeHtml(invMeta.tenantId || "this tenant")}</strong>. <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId || "")}">Reseed from ${escapeHtml(invMeta.tenantId || "tenant")} catalog</a> to fix.</div>`;
+      body += `<div class="alert-warn"><strong>Wrong products detected</strong> — this sheet has Beantol roast SKUs but you are viewing <strong>${escapeHtml(invMeta.tenantId || "this tenant")}</strong>. <a href="${adminRedirect("/admin/inventory/reseed", req)}">Reseed from ${escapeHtml(invMeta.tenantId || "tenant")} catalog</a> to fix.</div>`;
     }
     if (sheetItems.length) {
       const rows = sheetItems
@@ -2959,10 +3071,7 @@ app.get("/admin/inventory/view", async (req, res) => {
               : item.status === "low"
                 ? "status-low"
                 : "";
-          const tenantQ = invMeta.tenantId
-            ? `&tenant=${encodeURIComponent(invMeta.tenantId)}`
-            : "";
-          const action = `/admin/inventory/${encodeURIComponent(item.productId)}/update?token=${encodeURIComponent(token)}${tenantQ}`;
+          const action = `/admin/inventory/${encodeURIComponent(item.productId)}/update?token=${encodeURIComponent(token)}${tq}`;
           const warn =
             item.status === "low" || (item.qty !== "" && Number(item.qty) <= getLowStockThreshold())
               ? ' <span class="muted">⚠ low</span>'
@@ -2972,6 +3081,7 @@ app.get("/admin/inventory/view", async (req, res) => {
           <td>${escapeHtml(item.status)}</td>
           <td>
             <form class="inline-form" method="post" action="${action}">
+              ${tenantHiddenInput(req)}
               <input class="qty-input" name="qty" type="number" min="0" step="1" placeholder="Qty" value="${escapeHtml(item.qty === "" ? "" : String(item.qty))}">
               <select name="status">${optionTags([...VALID_STATUSES], item.status)}</select>
               <input name="notes" placeholder="Notes" value="${escapeHtml(item.notes || "")}">
@@ -2982,12 +3092,11 @@ app.get("/admin/inventory/view", async (req, res) => {
         })
         .join("");
       body +=
-        (body.includes("<table>") ? "" : "") +
         `<p class="muted">Live stock from Google Sheet <strong>${escapeHtml(invMeta.tab || "Inventory")}</strong> tab${tenantHint}. <strong>Qty ≤ ${getLowStockThreshold()}</strong> auto-sets <em>low</em>; <strong>Qty 0</strong> sets <em>out_of_stock</em>. Bot warns customers on low stock.</p>
 <table><tr><th>Product</th><th>Status</th><th>Qty & update</th></tr>${rows}</table>`;
     } else if (!loadError) {
       body +=
-        `<p class="alert-warn">Sheet is configured but no inventory rows loaded (raw rows: ${invMeta.rawRowCount ?? "?"}). Try <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : ""}">refresh</a> or check the Inventory tab in Google Sheets.${invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId)}">Seed ${escapeHtml(invMeta.tenantId)} menu</a>` : ""}</p>`;
+        `<p class="alert-warn">Sheet is configured but no inventory rows loaded (raw rows: ${invMeta.rawRowCount ?? "?"}). Try <a href="${adminRedirect("/admin/inventory/view", req, { refresh: "1" })}">refresh</a> or check the Inventory tab in Google Sheets.${invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` <a href="${adminRedirect("/admin/inventory/reseed", req)}">Seed ${escapeHtml(invMeta.tenantId)} menu</a>` : ""}</p>`;
     }
   } else {
     body += `<p class="muted">Sheet inventory not configured. Using <code>UNAVAILABLE_PRODUCTS</code> on Render.</p>
@@ -2995,51 +3104,39 @@ app.get("/admin/inventory/view", async (req, res) => {
 ${unknown.length ? `<p><strong>Unknown tokens:</strong> ${escapeHtml(unknown.join(", "))}</p>` : ""}
 <p class="muted">To enable live inventory: add an <strong>Inventory</strong> tab to your Sheet. Café tenants: use <strong>Reseed from catalog</strong> once after setup.</p>`;
   }
-  }
 
-  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : tenantParam ? `&tenant=${encodeURIComponent(tenantParam)}` : ""}">JSON API</a>${isInventorySheetConfigured() && (tenantParam || !multiTenant) ? ` · <a href="/admin/inventory/view?token=${encodeURIComponent(token)}&refresh=1${invMeta.tenantId ? `&tenant=${encodeURIComponent(invMeta.tenantId)}` : tenantParam ? `&tenant=${encodeURIComponent(tenantParam)}` : ""}">Force refresh</a>` : ""}${isInventorySheetConfigured() && invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` · <a href="/admin/inventory/reseed?token=${encodeURIComponent(token)}&tenant=${encodeURIComponent(invMeta.tenantId)}" onclick="return confirm('Replace all Inventory rows with this tenant\\'s menu products?')">Reseed from catalog</a>` : ""}</p>`;
+  body += `<p class="muted" style="margin-top:16px">Source: <strong>${escapeHtml(source || "env")}</strong> · <a href="/admin/inventory?token=${encodeURIComponent(token)}${tq}">JSON API</a>${isInventorySheetConfigured() ? ` · <a href="${adminRedirect("/admin/inventory/view", req, { refresh: "1" })}">Force refresh</a>` : ""}${isInventorySheetConfigured() && invMeta.tenantId && getCatalogProducts({ id: invMeta.tenantId }).length ? ` · <a href="${adminRedirect("/admin/inventory/reseed", req)}" onclick="return confirm('Replace all Inventory rows with this tenant\\'s menu products?')">Reseed from catalog</a>` : ""}</p>`;
 
   res.type("html").send(
     renderPage({
-      title: "Inventory",
-      active: "inventory",
-      token,
-      body,
-      flash: adminFlash(req),
-      req,
-      tenantId: invMeta.tenantId || tenantParam,
+      ...adminPageArgs(req, token, {
+        title: "Inventory",
+        active: "inventory",
+        body,
+        flash: adminFlash(req),
+      }),
     })
   );
 });
 
 app.get("/admin/inventory/reseed", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const token = adminToken(req);
-  const tenantQ = req.query.tenant ? `&tenant=${encodeURIComponent(req.query.tenant)}` : "";
-  if (listTenants().length > 1 && !req.query.tenant) {
-    return res.redirect(
-      `/admin/inventory/view?token=${encodeURIComponent(token)}&error=${encodeURIComponent("Select a shop (?tenant=offbeat-brew) before reseed")}`
-    );
-  }
+  if (!ensureAdminTenantInUrl(req, res)) return;
   try {
     const result = await runAdminWithTenant(req, () => reseedInventoryFromCatalog());
     if (result?.skipped) {
       return res.redirect(
-        `/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&error=${encodeURIComponent(result.reason || "Reseed skipped")}`
+        adminRedirect("/admin/inventory/view", req, { error: result.reason || "Reseed skipped" })
       );
     }
-    res.redirect(`/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&saved=1`);
+    res.redirect(adminRedirect("/admin/inventory/view", req, { saved: "1" }));
   } catch (err) {
-    res.redirect(
-      `/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&error=${encodeURIComponent(err.message)}`
-    );
+    res.redirect(adminRedirect("/admin/inventory/view", req, { error: err.message }));
   }
 });
 
 app.post("/admin/inventory/:productId/update", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const token = adminToken(req);
-  const tenantQ = req.query.tenant ? `&tenant=${encodeURIComponent(req.query.tenant)}` : "";
   try {
     const result = await runAdminWithTenant(req, () =>
       updateProductFields(req.params.productId, {
@@ -3050,25 +3147,31 @@ app.post("/admin/inventory/:productId/update", async (req, res) => {
     );
     if (!result?.ok) {
       return res.redirect(
-        `/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&error=${encodeURIComponent(result?.reason || "Update failed")}`
+        adminRedirect("/admin/inventory/view", req, { error: result?.reason || "Update failed" })
       );
     }
     await runAdminWithTenant(req, () => refreshInventoryCache());
-    res.redirect(`/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&saved=1`);
+    res.redirect(adminRedirect("/admin/inventory/view", req, { saved: "1" }));
   } catch (err) {
-    res.redirect(
-      `/admin/inventory/view?token=${encodeURIComponent(token)}${tenantQ}&error=${encodeURIComponent(err.message)}`
-    );
+    res.redirect(adminRedirect("/admin/inventory/view", req, { error: err.message }));
   }
 });
 
 // --- Admin: shop closures ---
 app.get("/admin/closures/view", async (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = req.query.token || "";
   const { loadClosures, formatClosureDate } = require("./lib/shop-closures");
   try {
-    const closures = await loadClosures(true);
+    const { closures, sheetId, tab } = await runAdminWithTenant(req, async () => {
+      const { getLeadsSheetId, getClosuresSheetTab } = require("./lib/tenant-google");
+      return {
+        closures: await loadClosures(true),
+        sheetId: getLeadsSheetId(),
+        tab: getClosuresSheetTab(),
+      };
+    });
     const today = new Intl.DateTimeFormat("en-CA", {
       timeZone: process.env.SUPPORT_TIMEZONE || "Asia/Manila",
       year: "numeric", month: "2-digit", day: "2-digit",
@@ -3087,9 +3190,6 @@ app.get("/admin/closures/view", async (req, res) => {
       })
       .join("");
 
-    const { getLeadsSheetId, getClosuresSheetTab } = require("./lib/tenant-google");
-    const sheetId = getLeadsSheetId();
-    const tab = getClosuresSheetTab();
     const sheetUrl = sheetId
       ? `https://docs.google.com/spreadsheets/d/${sheetId}/edit#gid=0`
       : null;
@@ -3098,7 +3198,7 @@ app.get("/admin/closures/view", async (req, res) => {
 <p class="muted">Special shop closures (holidays, events, etc.). The bot reads this sheet every 30 minutes and blocks appointment bookings on these dates. Past dates shown greyed out.</p>
 <p>
   ${sheetUrl ? `<a class="btn" href="${escapeHtml(sheetUrl)}" target="_blank" rel="noopener">Open Google Sheet (${escapeHtml(tab)} tab)</a>` : ""}
-  <a class="btn btn-sm" href="/admin/closures/view?token=${encodeURIComponent(token)}">Refresh</a>
+  <a class="btn btn-sm" href="${adminRedirect("/admin/closures/view", req)}">Refresh</a>
 </p>
 <h3>How to add a closure</h3>
 <ol>
@@ -3111,10 +3211,25 @@ ${rows
   : "<p class='muted'>No closures found in the sheet. Add rows to the Closures tab to block specific dates.</p>"
 }`;
 
-    res.type("html").send(renderPage({ title: "Shop Closures", active: "closures", token, body, flash: adminFlash(req) }));
+    res.type("html").send(
+      renderPage({
+        ...adminPageArgs(req, token, {
+          title: "Shop Closures",
+          active: "closures",
+          body,
+          flash: adminFlash(req),
+        }),
+      })
+    );
   } catch (err) {
     res.type("html").send(
-      renderPage({ title: "Shop Closures", active: "closures", token, body: `<p>Could not load closures: ${escapeHtml(err.message)}</p>` })
+      renderPage({
+        ...adminPageArgs(req, token, {
+          title: "Shop Closures",
+          active: "closures",
+          body: `<p>Could not load closures: ${escapeHtml(err.message)}</p>`,
+        }),
+      })
     );
   }
 });
@@ -3138,8 +3253,8 @@ app.get("/quote/:quoteId", async (req, res) => {
 // --- Admin: list conversations waiting for a human ---
 app.get("/admin/handoffs", (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const handoffs = listActiveHandoffs();
-  res.json({ count: handoffs.length, handoffs });
+  const handoffs = handoffsForAdmin(req);
+  res.json({ count: handoffs.length, tenantId: adminTenantId(req) || null, handoffs });
 });
 
 app.get("/admin/inventory", async (req, res) => {
@@ -3202,13 +3317,16 @@ app.get("/admin/inventory", async (req, res) => {
 
 app.get("/admin/quotes", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  if (!isQuoteCaptureConfigured()) {
-    return res.status(400).json({ error: "Quote capture not configured." });
-  }
   try {
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
-    const data = await listQuotes(limit);
-    res.json({ ok: true, ...data });
+    const data = await runAdminWithTenant(req, async () => {
+      if (!isQuoteCaptureConfigured()) {
+        return { error: "Quote capture not configured for this shop." };
+      }
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      return listQuotes(limit);
+    });
+    if (data.error) return res.status(400).json({ error: data.error });
+    res.json({ ok: true, tenantId: adminTenantId(req), ...data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3263,16 +3381,19 @@ app.get("/admin/tenants", (req, res) => {
 
 app.get("/admin/leads", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  if (!isLeadCaptureConfigured()) {
-    return res.status(400).json({
-      error: "Lead capture not configured.",
-      hint: "Set GOOGLE_LEADS_SHEET_ID on Render and share the Sheet with your service account (Editor). Enable Google Sheets API in Cloud Console.",
-    });
-  }
   try {
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
-    const data = await listLeads(limit);
-    res.json({ ok: true, ...data });
+    const data = await runAdminWithTenant(req, async () => {
+      if (!isLeadCaptureConfigured()) {
+        return {
+          error: "Lead capture not configured for this shop.",
+          hint: "Set leadsSheetId on the tenant in TENANTS_JSON and share the Sheet with your service account.",
+        };
+      }
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      return listLeads(limit);
+    });
+    if (data.error) return res.status(400).json(data);
+    res.json({ ok: true, tenantId: adminTenantId(req), ...data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3280,16 +3401,19 @@ app.get("/admin/leads", async (req, res) => {
 
 app.get("/admin/orders", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  if (!isOrderCaptureConfigured()) {
-    return res.status(400).json({
-      error: "Order capture not configured.",
-      hint: "Set GOOGLE_LEADS_SHEET_ID and add an Orders tab in the Sheet. Enable Google Sheets API.",
-    });
-  }
   try {
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
-    const data = await listOrders(limit);
-    res.json({ ok: true, ...data });
+    const data = await runAdminWithTenant(req, async () => {
+      if (!isOrderCaptureConfigured()) {
+        return {
+          error: "Order capture not configured for this shop.",
+          hint: "Set leadsSheetId on the tenant and add an Orders tab in the Sheet.",
+        };
+      }
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      return listOrders(limit);
+    });
+    if (data.error) return res.status(400).json(data);
+    res.json({ ok: true, tenantId: adminTenantId(req), ...data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3381,7 +3505,9 @@ app.get("/admin/meta-status", async (req, res) => {
 
 app.get("/admin/webhook-log", (req, res) => {
   if (!requireAdmin(req, res)) return;
+  if (!ensureAdminTenantInUrl(req, res)) return;
   const token = adminToken(req);
+  const tq = adminTenantQuery(req);
   const accept = req.headers.accept || "";
   const payload = {
     count: webhookDebugLog.length,
@@ -3401,17 +3527,18 @@ app.get("/admin/webhook-log", (req, res) => {
       .join("");
     const statsLine = webhookStats.lastPostAt
       ? `<p class="muted"><strong>Last webhook POST:</strong> ${escapeHtml(webhookStats.lastPostAt)} · object=<code>${escapeHtml(String(webhookStats.lastObject || "—"))}</code> · parsed events=${webhookStats.lastEventCount} · total POSTs=${webhookStats.totalPosts}</p>`
-      : `<div class="alert-warn"><strong>No webhook POSTs received</strong> since this server started. Meta is not hitting <code>/webhook</code> — check callback URL and Instagram subscription (<a href="${adminUrl("/admin/instagram-setup/view", token)}">Instagram setup</a>).</div>`;
+      : `<div class="alert-warn"><strong>No webhook POSTs received</strong> since this server started. Meta is not hitting <code>/webhook</code> — check callback URL and Instagram subscription (<a href="${adminUrl("/admin/instagram-setup/view", token)}${tq}">Instagram setup</a>).</div>`;
     return res.type("html").send(
       renderPage({
-        title: "Webhook debug log",
-        active: "webhooks",
-        token,
-        body: `${statsLine}
-<p class="muted">Newest first. <a href="${adminUrl("/admin/webhook-log", token)}&format=json">JSON</a></p>
+        ...adminPageArgs(req, token, {
+          title: "Webhook debug log",
+          active: "webhooks",
+          body: `${statsLine}
+<p class="muted">Newest first. <a href="${adminUrl("/admin/webhook-log", token)}${tq}&format=json">JSON</a> · Shared across all shops (Meta server log).</p>
 <p class="muted">Bot app id: <code>${escapeHtml(String(payload.metaAppId || "unknown"))}</code> · Page Inbox: <code>${escapeHtml(payload.pageInboxAppId)}</code></p>
 ${rows ? `<table><tr><th>Time (UTC)</th><th>Event</th></tr>${rows}</table>` : "<p>No events in buffer yet.</p>"}
 <p class="muted">Expected for Instagram DM: <code>webhook_post object=instagram</code> then <code>inbound_message platform=instagram</code>. If you only see Messenger posts, IG webhook is not subscribed.</p>`,
+        }),
       })
     );
   }
