@@ -160,13 +160,14 @@ A: [No]
 
 Payment
 
-Customers can pay via GCash or cash on pickup.
+Customers can pay via GCash (scan QR in chat) or cash on pickup.
 
-• GCash mobile number: 09451409383 (registered name: Reyna Mae Epe)
-  — This is a phone number, NOT a price. Never write ₱ or P before this number.
+• GCash: scan the QR code the bot sends in Messenger/Instagram — do NOT type the mobile number in chat replies.
+• Registered GCash name: Reyna Mae Epe (for customer reference when scanning only)
 • Cash: pay at pickup
 
-When customers ask for GCash, how to pay, or a QR code: give the number and name above. The chat bot can send our GCash QR image automatically (scan to pay).
+Q: How do I pay? / GCash? / Payment method?
+A: You can pay via GCash or cash on pickup. The bot will send our GCash QR code — open GCash, tap Scan, and scan the code. After paying, send your payment screenshot in this chat. Do not share the GCash mobile number in chat.
 
 After paying (for delivery or prepaid orders), send proof of payment in the chat.
 

@@ -12,6 +12,11 @@ const OpenAI = require("openai");
 const {
   fixMisplacedPesoOnPhoneNumbers,
   getGcashQrUrl,
+  usesGcashQrOnly,
+  isGcashOrPaymentInquiry,
+  buildGcashQrPaymentReply,
+  buildGcashQrPaymentSystemNote,
+  applyGcashQrOnlyReplyPolicy,
   shouldSendGcashQrImage,
   markGcashQrSent,
   shouldSkipGcashQrDuplicate,
@@ -3726,6 +3731,7 @@ async function deliverCustomerReply(senderId, userText, platform, reply, welcome
     message = applyWelcomeToReply(message, senderId, welcomeState);
   }
   message = sanitizeBotReply(message);
+  message = applyGcashQrOnlyReplyPolicy(message, getActiveTenant());
   if (!message) return;
   await sendMessageWithFallback(senderId, message);
   await maybeSendGcashQrImage(senderId, userText, message).catch((err) => {
@@ -4199,6 +4205,21 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
+  if (usesGcashQrOnly(tenant) && isGcashOrPaymentInquiry(userText)) {
+    captureLeadFromMessage(senderId, userText, platform, {
+      interest: "GCash payment",
+      stage: "ordering",
+    });
+    await deliverCustomerReply(
+      senderId,
+      userText,
+      platform,
+      buildGcashQrPaymentReply(tenant),
+      welcomeState
+    );
+    return;
+  }
+
   let reply;
 
   if (!openai) {
@@ -4221,6 +4242,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       ];
       if (closuresNote) {
         systemMessages.push({ role: "system", content: closuresNote });
+      }
+      const gcashQrNote = buildGcashQrPaymentSystemNote(tenant);
+      if (gcashQrNote) {
+        systemMessages.push({ role: "system", content: gcashQrNote });
       }
       if (shouldInjectInventoryForChat(tenant)) {
         systemMessages.push({ role: "system", content: getInventorySystemNote() });
@@ -4632,7 +4657,7 @@ async function maybeSendGcashQrImage(senderId, userText, botReply) {
   const tenant = getActiveTenant();
   const qrUrl = getGcashQrUrl(tenant);
   if (!qrUrl || !shouldSendGcashQrImage(userText, botReply, tenant)) return false;
-  if (shouldSkipGcashQrDuplicate(senderId)) return false;
+  if (!isGcashOrPaymentInquiry(userText) && shouldSkipGcashQrDuplicate(senderId)) return false;
 
   await sendImageWithFallback(senderId, qrUrl);
   markGcashQrSent(senderId);
