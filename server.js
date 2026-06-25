@@ -35,6 +35,10 @@ const {
   isWeekendDeliveryContext,
 } = require("./lib/shop-hours");
 const {
+  isShopHoursInquiry,
+  buildShopHoursReply,
+} = require("./lib/shop-hours-inquiry");
+const {
   messageHasImageAttachment,
   resolvePaymentProofSubmission,
   markPaymentProofHandled,
@@ -4550,6 +4554,18 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (await handleStructuredFlows(senderId, userText, platform, welcomeState)) {
+    return;
+  }
+
+  if (isShopHoursInquiry(userText)) {
+    const reply = buildShopHoursReply(tenant, {
+      liveChatAvailable: isWithinLiveSupportHours(),
+    });
+    captureLeadFromMessage(senderId, userText, platform, {
+      interest: "shop hours",
+      stage: "browsing",
+    });
+    await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
     return;
   }
 
