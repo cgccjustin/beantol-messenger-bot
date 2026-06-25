@@ -37,6 +37,8 @@ const {
 const {
   isShopHoursInquiry,
   buildShopHoursReply,
+  isShopClosedFulfillmentIntent,
+  buildShopClosedFulfillmentReply,
 } = require("./lib/shop-hours-inquiry");
 const {
   messageHasImageAttachment,
@@ -4453,6 +4455,40 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   if (equipmentSales.handled) {
     await deliverCustomerReply(senderId, userText, platform, equipmentSales.reply, welcomeState);
     return;
+  }
+
+  if (!isShopOpenNow(tenant) && !isPostQuoteFlowActive(senderId)) {
+    const looksLikeDeliveryDetails = looksLikeDeliveryDetailsSubmission(userText);
+    if (
+      isShopClosedFulfillmentIntent(userText, {
+        looksLikeDeliveryDetails,
+        historyTexts: recentForContext,
+      })
+    ) {
+      const reply = buildShopClosedFulfillmentReply(tenant, userText, {
+        looksLikeDeliveryDetails,
+      });
+      const deliveryTrigger = looksLikeDeliveryDetails
+        ? "delivery details submitted (shop closed)"
+        : isDeliveryInquiry(userText)
+          ? "delivery inquiry (shop closed)"
+          : null;
+      captureLeadFromMessage(senderId, userText, platform, {
+        isDeliveryInquiry: Boolean(deliveryTrigger),
+        deliveryTrigger,
+        stage: "ordering",
+        interest: looksLikeDeliveryDetails ? "delivery details" : "order (shop closed)",
+      });
+      captureOrderFromMessage(senderId, userText, platform, {
+        isOrderIntent: true,
+        isDeliveryDetails: looksLikeDeliveryDetails,
+      });
+      if (deliveryTrigger) {
+        await notifyDeliveryByEmail(senderId, userText, deliveryTrigger, platform);
+      }
+      await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
+      return;
+    }
   }
 
   if (isCebuDeliveryZonesEnabled()) {

@@ -65,15 +65,14 @@ Tagline: [Freedom from the Ordinary]
 Prices below are in Philippine pesos (₱). Update whenever menu changes.
 
 
-Coffee Series
+Coffee Series (cold only — ready-to-drink bottled cold brew; no hot option)
 
-• Offbeat Black — ₱130
-• Offbeat White — ₱140
-• Offbeat Mocha — ₱160
-• Offbeat Dulce — ₱160
-• [Add every drink with hot/cold where applicable]
+• Offbeat Black — ₱130 (cold)
+• Offbeat White — ₱140 (cold)
+• Offbeat Mocha — ₱160 (cold)
+• Offbeat Dulce — ₱160 (cold)
 
-IMPORTANT — All Coffee Series drinks (Offbeat Black, Offbeat White, Offbeat Mocha, Offbeat Dulce) are COLD BREW based, NOT espresso based. Never tell customers these drinks use espresso or an espresso base.
+IMPORTANT — All Coffee Series drinks are COLD ONLY. They are COLD BREW based, NOT espresso based. Never offer hot or iced options — there is no hot version. Never tell customers these drinks use espresso or an espresso base.
 
 
 Drink descriptions (Coffee Series)
@@ -135,6 +134,9 @@ A: Both are cold brew based (not espresso). Offbeat Black is pure cold brew — 
 
 Q: Are your drinks espresso-based? / Do you use espresso?
 A: No. Our Coffee Series drinks (Offbeat Black, Offbeat White, Offbeat Mocha, Offbeat Dulce) are made from our signature cold brew concentrate — cold brew based, not espresso based.
+
+Q: Hot or cold? / Do you have hot Offbeat White? / Iced or hot?
+A: Our Coffee Series (Offbeat Black, White, Mocha, Dulce) is cold only — ready-to-drink bottled cold brew. We do not offer a hot version. Ask which drink and quantity they'd like, then pickup or delivery.
 
 Q: What beans do you use? / What coffee beans are in your drinks?
 A: We use quality, specially curated Arabica beans for our recipes — our beans come from Beantol Roastery. If you have questions about the beans themselves (origins, roasts, etc.), message Beantol Roastery on Facebook Messenger and their team can help.
