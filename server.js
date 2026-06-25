@@ -4,6 +4,7 @@
  */
 
 require("dotenv").config();
+const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const https = require("https");
@@ -3359,7 +3360,53 @@ app.get("/admin/knowledge-status", (req, res) => {
     eventsLogConfigured: isEventsLogConfigured(),
     appointmentCaptureConfigured: isAppointmentCaptureConfigured(),
     hint: "Edit Google Docs per tenant. Sync: /admin/sync-knowledge (all) or ?tenant=ID. Legacy env mode uses one implicit tenant.",
+    probeHint: "Search synced Doc text: /admin/knowledge-probe?tenant=ID&q=justin",
   });
+});
+
+/** Grep synced Google Doc plain text on disk — confirms export includes a name/phrase. */
+app.get("/admin/knowledge-probe", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const q = String(req.query.q || "").trim();
+  if (!q || q.length > 80) {
+    return res.status(400).json({ error: "Query param q required (max 80 chars)." });
+  }
+  try {
+    const data = await runAdminWithTenant(req, async () => {
+      const tenant = getActiveTenant();
+      const files = rag.listSourceFiles(tenant);
+      const needle = q.toLowerCase();
+      const hits = [];
+      for (const filePath of files) {
+        const body = fs.readFileSync(filePath, "utf8");
+        const lower = body.toLowerCase();
+        let from = 0;
+        while (from < lower.length) {
+          const idx = lower.indexOf(needle, from);
+          if (idx < 0) break;
+          hits.push({
+            file: path.basename(filePath),
+            at: idx,
+            snippet: body.slice(Math.max(0, idx - 60), idx + q.length + 100).replace(/\s+/g, " ").trim(),
+          });
+          from = idx + q.length;
+          if (hits.length >= 5) break;
+        }
+        if (hits.length >= 5) break;
+      }
+      return {
+        tenantId: tenant?.id,
+        query: q,
+        sourceFiles: files.map((p) => path.basename(p)),
+        found: hits.length > 0,
+        hitCount: hits.length,
+        hits,
+      };
+    });
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/admin/tenants", (req, res) => {
