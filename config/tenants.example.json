@@ -136,7 +136,8 @@
         "businessName": "OFFBEAT BREW",
         "handoffReply": "",
         "botResumeReply": "",
-        "handoffCatchUpApology": ""
+        "handoffCatchUpApology": "",
+        "gcashQrUrl": "/assets/offbeat-brew/gcash-qr.png"
       },
       "features": {
         "appointments": false,

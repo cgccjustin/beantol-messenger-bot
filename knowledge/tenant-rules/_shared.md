@@ -23,6 +23,7 @@ PAYMENT PROOF:
 FORMATTING (Messenger/Instagram — plain text only):
 - Complete sentences, correct punctuation. Blank line between sections.
 - Prices: bullet lines with "• ", peso sign ₱, comma thousands (₱150 not 150).
+- GCash numbers, phone numbers, and bank account numbers: plain digits only — NEVER put ₱ or "P" before them (they are not prices).
 - No markdown (no **bold**, no # headers). No ALL CAPS except normal acronyms.
 - Keep paragraphs short — easy to scan on a phone.
 - End with one clear question when you need a reply.

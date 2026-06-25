@@ -160,11 +160,13 @@ A: [No]
 
 Payment
 
-Customers can pay via: [GCash, cash on pickup — list all]
+Customers can pay via GCash or cash on pickup.
 
-• GCash: [09451409383 ] (registered name: [Reyna Mae Epe])
-• Bank: [Bank name] | Account name [NAME] | Account number [NUMBER]
+• GCash mobile number: 09451409383 (registered name: Reyna Mae Epe)
+  — This is a phone number, NOT a price. Never write ₱ or P before this number.
 • Cash: pay at pickup
+
+When customers ask for GCash, how to pay, or a QR code: give the number and name above. The chat bot can send our GCash QR image automatically (scan to pay).
 
 After paying (for delivery or prepaid orders), send proof of payment in the chat.
 

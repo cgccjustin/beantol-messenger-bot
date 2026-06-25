@@ -4,11 +4,18 @@
  */
 
 require("dotenv").config();
+const path = require("path");
 const express = require("express");
 const https = require("https");
 const nodemailer = require("nodemailer");
 const OpenAI = require("openai");
-const { formatPeso, requestedBelowMoqBulkKg, buildWholesalePricingSystemNote, buildNonWholesaleBulkSystemNote } = require("./lib/pricing");
+const {
+  fixMisplacedPesoOnPhoneNumbers,
+  getGcashQrUrl,
+  shouldSendGcashQrImage,
+  markGcashQrSent,
+  shouldSkipGcashQrDuplicate,
+} = require("./lib/payment-display");
 const {
   isShopOpenNow,
   isShopClosedToday,
@@ -203,6 +210,7 @@ const {
 } = require("./lib/admin-ui");
 
 const app = express();
+app.use("/assets", express.static(path.join(__dirname, "public", "assets")));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -857,6 +865,7 @@ function sanitizeBotReply(text) {
   for (const pattern of stripPatterns) {
     out = out.replace(pattern, "");
   }
+  out = fixMisplacedPesoOnPhoneNumbers(out);
   return out.replace(/\n{3,}/g, "\n\n").replace(/  +/g, " ").trim() || text.trim();
 }
 
@@ -3719,6 +3728,9 @@ async function deliverCustomerReply(senderId, userText, platform, reply, welcome
   message = sanitizeBotReply(message);
   if (!message) return;
   await sendMessageWithFallback(senderId, message);
+  await maybeSendGcashQrImage(senderId, userText, message).catch((err) => {
+    console.warn(`GCash QR image skipped for ${senderId}:`, err.message);
+  });
   if (openai) appendChatHistory(senderId, userText, message);
 }
 
@@ -4553,6 +4565,81 @@ async function sendMessage(recipientId, text, options = {}) {
   recordOutboundMessage(recipientId, data.message_id, text);
   console.log(`Reply sent to ${recipientId}`);
   return data;
+}
+
+async function sendImageMessage(recipientId, imageUrl, options = {}) {
+  const token = getPageAccessToken(getActiveTenant());
+  if (!token) {
+    throw new Error("Page access token not configured for this tenant.");
+  }
+  const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${token}`;
+  const payload = {
+    recipient: { id: recipientId },
+    message: {
+      attachment: {
+        type: "image",
+        payload: { url: imageUrl, is_reusable: true },
+      },
+    },
+  };
+
+  if (options.tag) {
+    payload.messaging_type = "MESSAGE_TAG";
+    payload.tag = options.tag;
+  } else {
+    payload.messaging_type = options.messagingType || "RESPONSE";
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    const errMsg = data.error?.message || "Failed to send image";
+    console.error(`Meta Send API image error to ${recipientId}:`, JSON.stringify(data));
+    throw new Error(errMsg);
+  }
+
+  rememberBotMessageId(data.message_id);
+  recordOutboundMessage(recipientId, data.message_id, "[GCash QR image]");
+  console.log(`Image sent to ${recipientId}: ${imageUrl}`);
+  return data;
+}
+
+async function sendImageWithFallback(recipientId, imageUrl) {
+  const attempts = [
+    { label: "RESPONSE", opts: { messagingType: "RESPONSE" } },
+    { label: "HUMAN_AGENT", opts: { tag: "HUMAN_AGENT" } },
+    { label: "ACCOUNT_UPDATE", opts: { tag: "ACCOUNT_UPDATE" } },
+  ];
+
+  let lastError;
+  for (const { label, opts } of attempts) {
+    try {
+      return await sendImageMessage(recipientId, imageUrl, opts);
+    } catch (err) {
+      lastError = err;
+      console.warn(`Image send ${label} failed for ${recipientId}:`, err.message);
+    }
+  }
+  throw lastError;
+}
+
+async function maybeSendGcashQrImage(senderId, userText, botReply) {
+  const tenant = getActiveTenant();
+  const qrUrl = getGcashQrUrl(tenant);
+  if (!qrUrl || !shouldSendGcashQrImage(userText, botReply, tenant)) return false;
+  if (shouldSkipGcashQrDuplicate(senderId)) return false;
+
+  await sendImageWithFallback(senderId, qrUrl);
+  markGcashQrSent(senderId);
+  if (openai) {
+    appendChatHistory(senderId, "", "[Bot sent GCash QR code image for payment]");
+  }
+  return true;
 }
 
 /** After a human replied, Meta may require a message tag for the next automated send. */
