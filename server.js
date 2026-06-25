@@ -2492,9 +2492,10 @@ ${renderToolCard("Webhook debug log", "See recent echoes — human admin replies
 ${renderToolCard("Test email", "Send a test alert to HANDOFF_NOTIFY_EMAIL.", u("/admin/test-email"), true)}
 ${renderToolCard("Meta / Instagram status", "Check whether Instagram is linked to your Page token.", u("/admin/meta-status"), true)}
 ${renderToolCard("Shop closures", "Set special closure dates (holidays, events) in Google Sheet — bot picks them up automatically.", u("/admin/closures/view"))}
-${renderToolCard("Sync knowledge (Google Doc)", "Pull latest Q&A from Google Docs into the bot.", u("/admin/sync-knowledge"), true)}
-${renderToolCard("Reindex knowledge", "Rebuild search index from local + synced sources.", u("/admin/reindex-knowledge"), true)}
-${renderToolCard("Knowledge status", "See indexed chunks and last sync time.", u("/admin/knowledge-status"), true)}
+${renderToolCard("Sync knowledge (Google Doc)", "Pull the selected shop’s Google Doc into the bot (run after every Doc edit). Opens JSON with chunk count and builtAt.", u("/admin/sync-knowledge"), true)}
+${renderToolCard("Knowledge status", "Indexed chunks and last build time for the selected shop.", u("/admin/knowledge-status"), true)}
+${renderToolCard("Knowledge probe", "Search synced Doc text on the server (e.g. q=justin) — confirms a phrase was exported from Google Docs.", u("/admin/knowledge-probe?q=example"), true)}
+${renderToolCard("Reindex knowledge", "Rebuild search index from already-synced sources (rarely needed if Sync knowledge ran OK).", u("/admin/reindex-knowledge"), true)}
 ${renderToolCard("Handoffs JSON", "List active handoffs (API).", u("/admin/handoffs"), true)}
 </div>`;
 
