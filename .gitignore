@@ -3,6 +3,8 @@ node_modules/
 *.log
 knowledge/index.json
 knowledge/sources/*.txt
+# Per-tenant Google Doc sync + RAG index (generated at runtime)
+knowledge/tenants/
 API KEY.txt
 KEYS.txt
 secrets/
