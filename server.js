@@ -1100,6 +1100,17 @@ function isMetaPlatformAutomatedEcho(event, text = "") {
   const msg = event.message || {};
   const t = String(text || "").trim();
   const blob = `${t} ${attachmentPayloadBlob(msg)}`.toLowerCase();
+  const appId = getMessageAppId(event);
+
+  // Meta commerce / GCash UI is sent as template messages — humans rarely send these from Inbox.
+  if (Array.isArray(msg.attachments) && msg.attachments.some((a) => a.type === "template")) {
+    return true;
+  }
+
+  // Page Inbox echoes with no typed text are usually Meta UI chrome, not a human reply.
+  if (isPageInboxAppId(appId) && !t) {
+    return true;
+  }
 
   const metaPaymentPatterns = [
     /\bpay (?:with|via|through) gcash\b/i,
@@ -1121,13 +1132,23 @@ function isMetaPlatformAutomatedEcho(event, text = "") {
   if (
     !t &&
     Array.isArray(msg.attachments) &&
-    msg.attachments.some((a) => a.type === "template" || a.type === "fallback") &&
+    msg.attachments.some((a) => a.type === "fallback") &&
     /gcash|payment|pay|receipt|money|qr/i.test(blob)
   ) {
     return true;
   }
 
   return false;
+}
+
+/** Plain-text admin reply — not Meta template UI or bot payment lines. */
+function isLikelyTypedAdminReply(event, text = "") {
+  const t = String(text || "").trim();
+  if (isAdminResumeCommand(t)) return true;
+  if (!t) return false;
+  if (isBotGeneratedOutboundText(t)) return false;
+  if (isMetaPlatformAutomatedEcho(event, t)) return false;
+  return t.length >= 4;
 }
 
 function isPaymentRelatedEcho(event, text = "") {
@@ -1143,6 +1164,16 @@ function isBotOwnEcho(event, text = "") {
   if (metaAppId && appId && appId === metaAppId) return true;
   if (msg.mid && botSentMessageIds.has(msg.mid)) return true;
   if (text && isBotGeneratedOutboundText(text)) return true;
+  const recipient = event.recipient?.id ? String(event.recipient.id) : "";
+  if (
+    recipient &&
+    wasGcashQrSentRecently(recipient) &&
+    Array.isArray(msg.attachments) &&
+    msg.attachments.some((a) => a.type === "image") &&
+    !String(text || "").trim()
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -1311,6 +1342,9 @@ async function handlePageOutbound(event, platform = "messenger", entryId = "") {
     customerId,
     humanEcho,
     botEcho,
+    attachmentTypes: Array.isArray(event.message?.attachments)
+      ? event.message.attachments.map((a) => a.type).join(",")
+      : "",
     text: text.slice(0, 160),
   });
 
@@ -1325,9 +1359,9 @@ async function handlePageOutbound(event, platform = "messenger", entryId = "") {
 
   if (botEcho) return;
 
-  if (wasGcashQrSentRecently(customerId) && isPaymentRelatedEcho(event, text)) {
+  if (wasGcashQrSentRecently(customerId) && !isLikelyTypedAdminReply(event, text)) {
     console.log(
-      `Page outbound ignored for ${customerId} — Meta/payment echo after GCash QR (not admin takeover).`
+      `Page outbound ignored for ${customerId} — GCash QR grace period (Meta/payment echo, not admin).`
     );
     return;
   }
