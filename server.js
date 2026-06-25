@@ -1308,6 +1308,28 @@ async function expireStaleAdminTakeovers() {
 
 let mailTransporter = null;
 
+async function sendResendEmail({ to, subject, text }) {
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: EMAIL_FROM,
+      to,
+      subject,
+      text,
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.message || data.error || `Resend HTTP ${response.status}`);
+  }
+  return data;
+}
+
 async function sendAlertEmail({ subject, text, to }) {
   let recipients = [];
   if (to) {
@@ -1327,40 +1349,51 @@ async function sendAlertEmail({ subject, text, to }) {
     );
   }
 
-  if (provider === "resend") {
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${RESEND_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: EMAIL_FROM,
-        to: recipients,
-        subject,
-        text,
-      }),
-    });
+  const sent = [];
+  const failed = [];
 
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(data.message || data.error || `Resend HTTP ${response.status}`);
+  for (const recipient of recipients) {
+    try {
+      if (provider === "resend") {
+        const data = await sendResendEmail({ to: recipient, subject, text });
+        sent.push({ recipient, id: data.id });
+      } else {
+        const transporter = getMailTransporter();
+        if (!transporter) {
+          throw new Error("SMTP transporter unavailable.");
+        }
+        const info = await transporter.sendMail({
+          from: SMTP_FROM,
+          to: recipient,
+          subject,
+          text,
+        });
+        sent.push({ recipient, id: info.messageId });
+      }
+    } catch (err) {
+      failed.push({ recipient, error: err.message });
+      console.error(`Alert email failed for ${recipient}:`, err.message);
     }
-    return { provider: "resend", id: data.id, recipients };
   }
 
-  const transporter = getMailTransporter();
-  if (!transporter) {
-    throw new Error("SMTP transporter unavailable.");
+  if (!sent.length) {
+    const detail = failed.map((f) => `${f.recipient}: ${f.error}`).join("; ");
+    throw new Error(`All alert emails failed (${detail})`);
   }
 
-  const info = await transporter.sendMail({
-    from: SMTP_FROM,
-    to: recipients.join(", "),
-    subject,
-    text,
-  });
-  return { provider: "smtp", id: info.messageId, recipients };
+  if (failed.length) {
+    console.warn(
+      `Alert email partial delivery: sent ${sent.length}/${recipients.length} — failed: ${failed.map((f) => f.recipient).join(", ")}`
+    );
+  }
+
+  return {
+    provider,
+    id: sent[0]?.id,
+    recipients: sent.map((s) => s.recipient),
+    sent,
+    failed,
+  };
 }
 
 function recentUserMessages(senderId, limit = 5) {
@@ -3360,16 +3393,23 @@ app.get("/admin/test-email", async (req, res) => {
   }
 
   try {
-    const testRecipients = getNotifyRecipients("handoff", getActiveTenant());
-    const result = await sendAlertEmail({
-      subject: "Beantol Messenger — test email",
-      text: `If you received this, email is working via ${getEmailProvider()}.`,
-      to: testRecipients,
+    const result = await runAdminWithTenant(req, async () => {
+      const tenant = getActiveTenant();
+      const testRecipients = getNotifyRecipients("handoff", tenant);
+      const emailResult = await sendAlertEmail({
+        subject: `${businessName(tenant)} — test alert email`,
+        text: `If you received this, email is working via ${getEmailProvider()} for tenant ${tenant.id}.`,
+        to: testRecipients,
+      });
+      return { tenantId: tenant.id, testRecipients, emailResult };
     });
     res.json({
       ok: true,
-      sentTo: testRecipients,
-      provider: result.provider,
+      tenantId: result.tenantId,
+      configuredRecipients: result.testRecipients,
+      sentTo: result.emailResult.recipients,
+      failed: result.emailResult.failed || [],
+      provider: result.emailResult.provider,
     });
   } catch (err) {
     res.status(500).json({ error: err.message, provider: getEmailProvider() });
@@ -4784,9 +4824,20 @@ async function verifyEmailOnStartup() {
   if (!provider) return;
 
   if (provider === "resend") {
-    console.log(
-      `Email via Resend — alerts go to ${HANDOFF_NOTIFY_EMAIL} (from ${EMAIL_FROM})`
-    );
+    console.log(`Email via Resend (from ${EMAIL_FROM})`);
+    if (/resend\.dev/i.test(EMAIL_FROM)) {
+      console.warn(
+        "Resend test sender (onboarding@resend.dev) can only deliver to your Resend account email unless you verify a custom domain and set EMAIL_FROM to that domain."
+      );
+    }
+    for (const tenant of listTenants()) {
+      const handoff = getNotifyRecipients("handoff", tenant);
+      const lead = getNotifyRecipients("lead", tenant);
+      const order = getNotifyRecipients("order", tenant);
+      console.log(
+        `  ${tenant.id} alerts — handoff: ${handoff.join(", ") || "(none)"}; lead: ${lead.join(", ") || "(none)"}; order: ${order.join(", ") || "(none)"}`
+      );
+    }
     return;
   }
 
@@ -4794,9 +4845,11 @@ async function verifyEmailOnStartup() {
   if (!transporter) return;
   try {
     await transporter.verify();
-    console.log(
-      `Email via SMTP — alerts go to ${HANDOFF_NOTIFY_EMAIL} (may fail on Render due to blocked ports)`
-    );
+    console.log(`Email via SMTP (may fail on Render due to blocked ports)`);
+    for (const tenant of listTenants()) {
+      const handoff = getNotifyRecipients("handoff", tenant);
+      console.log(`  ${tenant.id} handoff alerts → ${handoff.join(", ") || "(none)"}`);
+    }
   } catch (err) {
     console.error(
       `SMTP verify failed (${err.message}). Use RESEND_API_KEY on Render instead.`
