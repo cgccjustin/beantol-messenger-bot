@@ -14,7 +14,9 @@ const {
   getGcashQrUrl,
   usesGcashQrOnly,
   isGcashOrPaymentInquiry,
+  isQrCodeRequest,
   buildGcashQrPaymentReply,
+  buildGcashQrResendReply,
   buildGcashQrPaymentSystemNote,
   applyGcashQrOnlyReplyPolicy,
   shouldSendGcashQrImage,
@@ -3724,7 +3726,7 @@ async function processWebhookEvents(body) {
   }
 }
 
-async function deliverCustomerReply(senderId, userText, platform, reply, welcomeState = null) {
+async function deliverCustomerReply(senderId, userText, platform, reply, welcomeState = null, options = {}) {
   let message = String(reply || "").trim();
   if (!message) return;
   if (welcomeState && !welcomeState.done) {
@@ -3734,9 +3736,66 @@ async function deliverCustomerReply(senderId, userText, platform, reply, welcome
   message = applyGcashQrOnlyReplyPolicy(message, getActiveTenant());
   if (!message) return;
   await sendMessageWithFallback(senderId, message);
-  await maybeSendGcashQrImage(senderId, userText, message).catch((err) => {
-    console.warn(`GCash QR image skipped for ${senderId}:`, err.message);
-  });
+  if (!options.skipGcashQr) {
+    await maybeSendGcashQrImage(senderId, userText, message).catch((err) => {
+      console.error(`GCash QR image failed for ${senderId}:`, err.message);
+    });
+  }
+  if (openai) appendChatHistory(senderId, userText, message);
+}
+
+async function deliverGcashQrPayment(senderId, userText, platform, tenant, welcomeState = null) {
+  const qrUrl = getGcashQrUrl(tenant);
+  if (!qrUrl) {
+    await deliverCustomerReply(
+      senderId,
+      userText,
+      platform,
+      "Sorry — GCash QR is not set up yet. Please message the shop for payment details.",
+      welcomeState
+    );
+    return;
+  }
+
+  const isResend = isQrCodeRequest(userText);
+  let message = isResend ? buildGcashQrResendReply(tenant) : buildGcashQrPaymentReply(tenant);
+  if (welcomeState && !welcomeState.done) {
+    message = applyWelcomeToReply(message, senderId, welcomeState);
+  }
+  message = sanitizeBotReply(message);
+
+  const sendQrImage = async () => {
+    try {
+      await sendImageWithFallback(senderId, qrUrl);
+      markGcashQrSent(senderId);
+      console.log(`GCash QR image sent to ${senderId}: ${qrUrl}`);
+      if (openai) {
+        appendChatHistory(senderId, "", "[Bot sent GCash QR code image for payment]");
+      }
+      return null;
+    } catch (err) {
+      console.error(`GCash QR image failed for ${senderId}:`, err.message);
+      return err;
+    }
+  };
+
+  if (isResend) {
+    const err = await sendQrImage();
+    if (err) {
+      message += `\n\nIf the QR did not appear, open this link in your browser to scan:\n${qrUrl}`;
+    }
+    await sendMessageWithFallback(senderId, message);
+  } else {
+    await sendMessageWithFallback(senderId, message);
+    const err = await sendQrImage();
+    if (err) {
+      await sendMessageWithFallback(
+        senderId,
+        `If the QR did not appear, open this link in your browser to scan:\n${qrUrl}`
+      );
+    }
+  }
+
   if (openai) appendChatHistory(senderId, userText, message);
 }
 
@@ -4205,18 +4264,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
-  if (usesGcashQrOnly(tenant) && isGcashOrPaymentInquiry(userText)) {
+  if (getGcashQrUrl(tenant) && (isGcashOrPaymentInquiry(userText) || isQrCodeRequest(userText))) {
     captureLeadFromMessage(senderId, userText, platform, {
       interest: "GCash payment",
       stage: "ordering",
     });
-    await deliverCustomerReply(
-      senderId,
-      userText,
-      platform,
-      buildGcashQrPaymentReply(tenant),
-      welcomeState
-    );
+    await deliverGcashQrPayment(senderId, userText, platform, tenant, welcomeState);
     return;
   }
 
@@ -4657,7 +4710,9 @@ async function maybeSendGcashQrImage(senderId, userText, botReply) {
   const tenant = getActiveTenant();
   const qrUrl = getGcashQrUrl(tenant);
   if (!qrUrl || !shouldSendGcashQrImage(userText, botReply, tenant)) return false;
-  if (!isGcashOrPaymentInquiry(userText) && shouldSkipGcashQrDuplicate(senderId)) return false;
+  if (!isGcashOrPaymentInquiry(userText) && !isQrCodeRequest(userText) && shouldSkipGcashQrDuplicate(senderId)) {
+    return false;
+  }
 
   await sendImageWithFallback(senderId, qrUrl);
   markGcashQrSent(senderId);
