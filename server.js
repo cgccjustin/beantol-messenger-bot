@@ -4465,8 +4465,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         historyTexts: recentForContext,
       })
     ) {
+      const { loadClosures } = require("./lib/shop-closures");
+      const closures = await loadClosures(true);
       const reply = buildShopClosedFulfillmentReply(tenant, userText, {
         looksLikeDeliveryDetails,
+        closures,
       });
       const deliveryTrigger = looksLikeDeliveryDetails
         ? "delivery details submitted (shop closed)"
@@ -4594,8 +4597,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (isShopHoursInquiry(userText)) {
-    const reply = buildShopHoursReply(tenant, {
+    const reply = await buildShopHoursReply(tenant, {
       liveChatAvailable: isWithinLiveSupportHours(),
+      userText,
+      forceClosures: true,
     });
     captureLeadFromMessage(senderId, userText, platform, {
       interest: "shop hours",
