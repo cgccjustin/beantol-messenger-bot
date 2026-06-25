@@ -22,6 +22,7 @@ const {
   shouldSendGcashQrImage,
   markGcashQrSent,
   shouldSkipGcashQrDuplicate,
+  wasGcashQrSentRecently,
 } = require("./lib/payment-display");
 const {
   isShopOpenNow,
@@ -1081,6 +1082,60 @@ function isPageInboxAppId(appId) {
   return false;
 }
 
+function attachmentPayloadBlob(message) {
+  const attachments = message?.attachments;
+  if (!Array.isArray(attachments)) return "";
+  try {
+    return attachments
+      .map((a) => JSON.stringify(a.payload || a))
+      .join(" ")
+      .toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** Meta Business Suite / Messenger payment UI (e.g. GCash pay popup) — not a human admin. */
+function isMetaPlatformAutomatedEcho(event, text = "") {
+  const msg = event.message || {};
+  const t = String(text || "").trim();
+  const blob = `${t} ${attachmentPayloadBlob(msg)}`.toLowerCase();
+
+  const metaPaymentPatterns = [
+    /\bpay (?:with|via|through) gcash\b/i,
+    /\bsend (?:a )?payment\b/i,
+    /\bgcash receipt\b/i,
+    /\bverify (?:your )?(?:payment|receipt|transfer)\b/i,
+    /\btap below to pay\b/i,
+    /\bpayment request\b/i,
+    /\brequest payment\b/i,
+    /\bsend money\b/i,
+    /\breceipt verification\b/i,
+  ];
+  if (metaPaymentPatterns.some((p) => p.test(t))) return true;
+
+  if (/gcash|pay_now|payment_request|receipt.?verif|send.?money|commerce_payment/i.test(blob)) {
+    return true;
+  }
+
+  if (
+    !t &&
+    Array.isArray(msg.attachments) &&
+    msg.attachments.some((a) => a.type === "template" || a.type === "fallback") &&
+    /gcash|payment|pay|receipt|money|qr/i.test(blob)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function isPaymentRelatedEcho(event, text = "") {
+  if (isMetaPlatformAutomatedEcho(event, text)) return true;
+  const blob = `${text} ${attachmentPayloadBlob(event.message)}`.toLowerCase();
+  return /\bgcash\b|pay (?:with|via|through)|payment request|scan to pay|qr code/i.test(blob);
+}
+
 function isBotOwnEcho(event, text = "") {
   const msg = event.message;
   if (!msg) return false;
@@ -1092,6 +1147,7 @@ function isBotOwnEcho(event, text = "") {
 }
 
 function isHumanAdminEcho(event, text = "") {
+  if (isMetaPlatformAutomatedEcho(event, text)) return false;
   if (!isMessageEchoEvent(event)) {
     const senderId = event.sender?.id ? String(event.sender.id) : "";
     return Boolean(senderId && getOutboundSenderIds().has(senderId) && !isBotOwnEcho(event, text));
@@ -1155,6 +1211,12 @@ function isBotGeneratedOutboundText(text) {
   if (/^Sorry — that item is not available for order right now\./i.test(t)) return true;
   if (/^Sorry — I couldn't generate that quote just now\./i.test(t)) return true;
   if (/^No problem — what would you like a quote for\?/i.test(t)) return true;
+  if (/^You can pay via GCash or cash on pickup/i.test(t)) return true;
+  if (/^I'll send our GCash QR code now/i.test(t)) return true;
+  if (/^Here's our GCash QR code/i.test(t)) return true;
+  if (/open GCash, tap Scan/i.test(t)) return true;
+  if (/After paying, please send your payment screenshot/i.test(t)) return true;
+  if (/If the QR did not appear, open this link/i.test(t)) return true;
   return false;
 }
 
@@ -1262,6 +1324,20 @@ async function handlePageOutbound(event, platform = "messenger", entryId = "") {
   }
 
   if (botEcho) return;
+
+  if (wasGcashQrSentRecently(customerId) && isPaymentRelatedEcho(event, text)) {
+    console.log(
+      `Page outbound ignored for ${customerId} — Meta/payment echo after GCash QR (not admin takeover).`
+    );
+    return;
+  }
+
+  if (isMetaPlatformAutomatedEcho(event, text)) {
+    console.log(
+      `Page outbound ignored for ${customerId} — Meta platform automated message (GCash/payment).`
+    );
+    return;
+  }
 
   if (!humanEcho) {
     console.log(
