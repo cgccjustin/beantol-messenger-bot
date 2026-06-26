@@ -231,6 +231,7 @@ const {
   createWelcomeState,
   applyWelcomeToReply,
   welcomeOnlyReply,
+  isGreetingOnly,
 } = require("./lib/welcome");
 const {
   escapeHtml,
@@ -4336,6 +4337,26 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       stage: "browsing",
       lastMessage: userText,
       trigger: "get started",
+    });
+    await deliverCustomerReply(
+      senderId,
+      userText,
+      platform,
+      welcomeOnlyReply(senderId, welcomeState),
+      welcomeState
+    );
+    return;
+  }
+
+  if (isGreetingOnly(userText) && welcomeState.prependWelcome) {
+    queueLeadCapture({
+      senderId,
+      platform,
+      name: profileName || "",
+      interest: "new chat",
+      stage: "browsing",
+      lastMessage: userText,
+      trigger: "greeting",
     });
     await deliverCustomerReply(
       senderId,
