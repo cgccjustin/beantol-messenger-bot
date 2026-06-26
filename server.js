@@ -151,6 +151,7 @@ const {
 const {
   buildOutOfStockProductReply,
   buildInStockTasteRecommendationReply,
+  buildInStockAvailabilityReply,
   enforceOutOfStockProductPolicy,
   filterAlternativesToInStock,
   buildTasteRecommendationInventoryHint,
@@ -158,6 +159,11 @@ const {
   buildCafeMenuListSystemHint,
   getUnavailableLabels,
 } = require("./lib/inventory-availability");
+const {
+  buildNonWholesaleBulkSystemNote,
+  buildWholesalePricingSystemNote,
+  buildWholesaleOrderPricingSystemNote,
+} = require("./lib/pricing");
 const { requestChatCompletion, isTransientError } = require("./lib/openai-chat");
 const {
   listPipelineLeads,
@@ -4484,6 +4490,16 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
+  const inStockAvailabilityReply = buildInStockAvailabilityReply(userText);
+  if (inStockAvailabilityReply) {
+    captureLeadFromMessage(senderId, userText, platform, {
+      interest: "bean availability",
+      stage: "browsing",
+    });
+    await deliverCustomerReply(senderId, userText, platform, inStockAvailabilityReply, welcomeState);
+    return;
+  }
+
   if (
     isAgentOfferAcceptanceTurn(userText, lastAssistantReply, replyToContext) &&
     getHandoffSession(senderId)?.mode !== "agent_requested"
@@ -5040,7 +5056,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       if (filterSizeNote) {
         systemMessages.push({ role: "system", content: filterSizeNote });
       }
-      const recentForPricing = recentUserMessages(senderId, 4);
+      const recentForPricing = recentUserMessages(senderId, 12);
       const sessionQuote = getQuoteConfirmSession(senderId)?.quote;
       const nonWholesaleNote = buildNonWholesaleBulkSystemNote(
         userText,
@@ -5049,6 +5065,14 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       );
       if (nonWholesaleNote) {
         systemMessages.push({ role: "system", content: nonWholesaleNote });
+      }
+      const wholesaleOrderNote = buildWholesaleOrderPricingSystemNote(
+        userText,
+        recentForPricing,
+        sessionQuote
+      );
+      if (wholesaleOrderNote) {
+        systemMessages.push({ role: "system", content: wholesaleOrderNote });
       }
       const wholesalePricingNote = buildWholesalePricingSystemNote(
         userText,
