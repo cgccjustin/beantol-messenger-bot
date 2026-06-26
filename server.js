@@ -191,6 +191,16 @@ const {
   resumePostQuoteFromRepliedMessage,
 } = require("./lib/post-quote-flow");
 const {
+  isCafeOrderFlowEnabled,
+  isCafeOrderFlowActive,
+  clearCafeOrderSession,
+  tryStartCafeOrderFlow,
+  tryResumeCafeOrderFlow,
+  processCafeOrderFlowPreAi,
+  buildCafeOrderSystemNote,
+  getCafeOrderPaymentSummary,
+} = require("./lib/cafe-order-flow");
+const {
   recordOutboundMessage,
   resolveInboundReplyTo,
   hasReplyTag,
@@ -850,7 +860,7 @@ function looksLikeDeliveryDetailsSubmission(text) {
     /\b(?:09\d{9}|\+?63[\s-]?9\d{9})\b/.test(t) ||
     /\b\d{3}[-.\s]?\d{3,4}[-.\s]?\d{4}\b/.test(t);
   const hasAddressHint =
-    /\b(?:street|st\.|ave|avenue|road|rd\.|barangay|brgy|city|cebu|village|subdivision|unit|floor|blk|block|purok|banilad|mandaue|lapu|consolacion)\b/i.test(
+    /\b(?:street|st\.|ave|avenue|road|rd\.|barangay|brgy|city|cebu|iligan|village|subdivision|unit|floor|blk|block|purok|banilad|mandaue|lapu|consolacion)\b/i.test(
       t
     ) || t.length > 80;
   return hasPhone && hasAddressHint;
@@ -1618,14 +1628,14 @@ function captureOrderFromMessage(senderId, userText, platform, options = {}) {
     isOrderIntent: options.isPaymentProofImage || isOrderIntent,
     isPaymentProofImage: Boolean(options.isPaymentProofImage),
   });
-  if (!signal && !options.postQuoteCapture) return;
+  if (!signal && !options.postQuoteCapture && !options.cafeOrderCapture) return;
 
   queueOrderCapture({
     senderId,
     platform,
     name: signal?.name || options.name || "",
     phone: options.phone || signal?.phone || "",
-    bean: signal?.bean || "",
+    bean: options.bean || signal?.bean || "",
     size: signal?.size || "",
     fulfillment: options.fulfillment || signal?.fulfillment || "",
     address: options.address || signal?.address || "",
@@ -1635,6 +1645,7 @@ function captureOrderFromMessage(senderId, userText, platform, options = {}) {
     userText,
     historyTexts,
     assistantReply: options.assistantReply || "",
+    lineItems: options.lineItems || "",
     trigger: options.trigger || signal?.trigger || "order",
   });
 }
@@ -4430,8 +4441,73 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       if (isPostQuoteFlowActive(senderId)) {
         clearPostQuoteSession(senderId);
       }
+      if (isCafeOrderFlowActive(senderId)) {
+        clearCafeOrderSession(senderId);
+      }
       captureLeadFromMessage(senderId, userText, platform, { isHandoff: true });
       await attemptCustomerHandoff(senderId, userText, "phrase match", platform, welcomeState);
+      return;
+    }
+  }
+
+  if (isCafeOrderFlowEnabled(tenant)) {
+    const recentForCafe = recentUserMessages(senderId, 8);
+    const cafeStart = tryStartCafeOrderFlow(senderId, userText, tenant, {
+      recentUserTexts: recentForCafe,
+    });
+    if (cafeStart.started && cafeStart.reply) {
+      captureLeadFromMessage(senderId, userText, platform, {
+        interest: cafeStart.captureOrder?.bean || "cafe order",
+        stage: "ordering",
+      });
+      if (cafeStart.captureOrder) {
+        captureOrderFromMessage(senderId, userText, platform, cafeStart.captureOrder);
+      }
+      await deliverCustomerReply(senderId, userText, platform, cafeStart.reply, welcomeState);
+      return;
+    }
+
+    const cafeResume = tryResumeCafeOrderFlow(senderId, userText, tenant, {
+      lastAssistantReply,
+      recentUserTexts: recentForCafe,
+    });
+    if (cafeResume.resumed) {
+      const cafeFlow = processCafeOrderFlowPreAi(senderId, userText, tenant, {
+        agentAvailable: isWithinLiveSupportHours(),
+        isWeekend: isShopClosedToday(tenant),
+      });
+      if (cafeFlow.handled) {
+        captureLeadFromMessage(senderId, userText, platform, {
+          interest: cafeFlow.captureOrder?.bean || "cafe order",
+          stage: "ordering",
+        });
+        if (cafeFlow.captureOrder) {
+          captureOrderFromMessage(senderId, userText, platform, cafeFlow.captureOrder);
+        }
+        if (cafeFlow.notifyDelivery) {
+          await notifyDeliveryByEmail(senderId, userText, "cafe order delivery details", platform);
+        }
+        await deliverCustomerReply(senderId, userText, platform, cafeFlow.reply, welcomeState);
+        return;
+      }
+    }
+
+    const cafeFlow = processCafeOrderFlowPreAi(senderId, userText, tenant, {
+      agentAvailable: isWithinLiveSupportHours(),
+      isWeekend: isShopClosedToday(tenant),
+    });
+    if (cafeFlow.handled) {
+      captureLeadFromMessage(senderId, userText, platform, {
+        interest: cafeFlow.captureOrder?.bean || "cafe order",
+        stage: "ordering",
+      });
+      if (cafeFlow.captureOrder) {
+        captureOrderFromMessage(senderId, userText, platform, cafeFlow.captureOrder);
+      }
+      if (cafeFlow.notifyDelivery) {
+        await notifyDeliveryByEmail(senderId, userText, "cafe order delivery details", platform);
+      }
+      await deliverCustomerReply(senderId, userText, platform, cafeFlow.reply, welcomeState);
       return;
     }
   }
@@ -4462,7 +4538,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   const chatHistory = getChatHistory(senderId);
   const recentForContext = recentUserMessages(senderId, 6);
 
-  if (shouldSuppressAfterPaymentProof(senderId, userText) && !isPostQuoteFlowActive(senderId)) {
+  if (shouldSuppressAfterPaymentProof(senderId, userText) && !isPostQuoteFlowActive(senderId) && !isCafeOrderFlowActive(senderId)) {
     return;
   }
 
@@ -4480,15 +4556,19 @@ async function handleMessage(senderId, userText, platform = "messenger", message
 
   if (paymentResolution.action === "ack") {
     const pendingQuote = getQuoteConfirmSession(senderId)?.quote;
+    const cafePayment = getCafeOrderPaymentSummary(senderId, tenant);
     const reply = buildPaymentProofAckReply({
       agentAvailable: isWithinLiveSupportHours(),
       isWeekend: isShopClosedToday(tenant),
-      quoteSummary: pendingQuote?.summary || "",
-      quoteSubtotal: pendingQuote?.subtotal ?? null,
+      quoteSummary: cafePayment?.summary || pendingQuote?.summary || "",
+      quoteSubtotal: cafePayment?.subtotal ?? pendingQuote?.subtotal ?? null,
       hasImage: paymentResolution.hasImage !== false,
       formatPeso,
     });
     markPaymentProofHandled(senderId);
+    if (cafePayment) {
+      clearCafeOrderSession(senderId);
+    }
     captureOrderFromMessage(senderId, userText, platform, {
       isOrderIntent: true,
       isPaymentProofImage: true,
@@ -4706,6 +4786,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       const gcashQrNote = buildGcashQrPaymentSystemNote(tenant);
       if (gcashQrNote) {
         systemMessages.push({ role: "system", content: gcashQrNote });
+      }
+      const cafeOrderNote = buildCafeOrderSystemNote(senderId, tenant);
+      if (cafeOrderNote) {
+        systemMessages.push({ role: "system", content: cafeOrderNote });
       }
       if (shouldInjectInventoryForChat(tenant)) {
         systemMessages.push({ role: "system", content: getInventorySystemNote() });
