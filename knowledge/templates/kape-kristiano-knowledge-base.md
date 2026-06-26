@@ -185,6 +185,6 @@ Contact
 Notes for bot staff
 
 • Update prices here when they change — then run /admin/sync-knowledge?tenant=kape-kristiano
-• Product catalog in code is still Beantol-focused; keep quotes/formal quotes OFF until a per-tenant catalog exists (features.quotes: false in tenants.json)
+• Menu catalog for order parsing: lib/tenant-catalog.js (KAPE_KRISTIANO_PRODUCTS). After deploy, run /admin/inventory/reseed?tenant=kape-kristiano once if Inventory tab needs KK rows.
 
 
