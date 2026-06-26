@@ -13,7 +13,7 @@ We're a startup with a dream, brewing something bigger one cup at a time. As we 
 This is only the beginning. Join us on the journey. ☕
 ]
 
-Example: We serve specialty coffee and [food/snacks] in [area]. [What makes you different from other cafés.]
+We serve specialty ready-to-drink bottled coffee in Iligan City — Coffee Series (cold brew) and Unplugged non-coffee drinks. No food or snack menu at this time.
 
 
 Location & Hours
@@ -118,8 +118,7 @@ Unplugged Series
 
 Food & Pastries
 
-• [Item] — ₱[price]
-• [Item] — ₱[price]
+No food or snack menu — drinks only (Coffee Series and Unplugged Series above).
 
 
 Extras / Add-ons
@@ -155,8 +154,8 @@ A: • [Choco Unplugged] — ₱[170]
 • [Matcha  Unplugged] — ₱[180]
 • [Strawberry Unplugged] — ₱[170]
 
-Q: Do you serve food?
-A: [No]
+Q: Do you serve food? / Snacks? / Pastries?
+A: No — we serve drinks only (Coffee Series cold brew and Unplugged non-coffee drinks). No food or snack menu at this time.
 
 
 

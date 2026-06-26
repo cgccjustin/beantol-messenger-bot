@@ -202,8 +202,10 @@ const {
   stashCafeOrderHints,
   tryStartCafeOrderFlow,
   tryResumeCafeOrderFlow,
+  tryHandleCafeMenuInquiry,
   processCafeOrderFlowPreAi,
   buildCafeOrderSystemNote,
+  buildMixedProductQuestionNote,
   buildPaymentModeNote,
   getCafeOrderPaymentSummary,
   isPaymentModeQuestion,
@@ -4800,6 +4802,18 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     }
   }
 
+  if (isCafeOrderFlowEnabled(tenant)) {
+    const menuHit = tryHandleCafeMenuInquiry(userText, tenant);
+    if (menuHit.handled && menuHit.reply) {
+      captureLeadFromMessage(senderId, userText, platform, {
+        interest: "menu",
+        stage: "browsing",
+      });
+      await deliverCustomerReply(senderId, userText, platform, menuHit.reply, welcomeState);
+      return;
+    }
+  }
+
   if (isKnowledgeFaqInquiry(userText)) {
     const reply = buildKnowledgeFaqReply(tenant, userText);
     if (reply) {
@@ -4856,6 +4870,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       const cafeOrderNote = buildCafeOrderSystemNote(senderId, tenant);
       if (cafeOrderNote) {
         systemMessages.push({ role: "system", content: cafeOrderNote });
+      }
+      const mixedProductNote = buildMixedProductQuestionNote(userText, tenant);
+      if (mixedProductNote) {
+        systemMessages.push({ role: "system", content: mixedProductNote });
       }
       if (shouldInjectInventoryForChat(tenant)) {
         systemMessages.push({ role: "system", content: getInventorySystemNote() });
