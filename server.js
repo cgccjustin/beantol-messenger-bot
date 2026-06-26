@@ -4524,7 +4524,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       if (cafeStart.notifyDelivery) {
         await notifyDeliveryByEmail(senderId, userText, "cafe order delivery details", platform);
       }
-      await deliverCustomerReply(senderId, userText, platform, cafeStart.reply, welcomeState);
+      await deliverCustomerReply(senderId, userText, platform, cafeStart.reply, welcomeState, {
+        skipCafeOrderNudge: true,
+      });
       return;
     }
 
@@ -4549,7 +4551,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         if (cafeFlow.notifyDelivery) {
           await notifyDeliveryByEmail(senderId, userText, "cafe order delivery details", platform);
         }
-        await deliverCustomerReply(senderId, userText, platform, cafeFlow.reply, welcomeState);
+        await deliverCustomerReply(senderId, userText, platform, cafeFlow.reply, welcomeState, {
+          skipCafeOrderNudge: true,
+        });
         return;
       }
     }
@@ -4570,7 +4574,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       if (cafeFlow.notifyDelivery) {
         await notifyDeliveryByEmail(senderId, userText, "cafe order delivery details", platform);
       }
-      await deliverCustomerReply(senderId, userText, platform, cafeFlow.reply, welcomeState);
+      await deliverCustomerReply(senderId, userText, platform, cafeFlow.reply, welcomeState, {
+        skipCafeOrderNudge: true,
+      });
       return;
     }
   }
