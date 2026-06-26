@@ -4454,6 +4454,8 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     const recentForCafe = recentUserMessages(senderId, 8);
     const cafeStart = tryStartCafeOrderFlow(senderId, userText, tenant, {
       recentUserTexts: recentForCafe,
+      isWeekend: isShopClosedToday(tenant),
+      agentAvailable: isWithinLiveSupportHours(),
     });
     if (cafeStart.started && cafeStart.reply) {
       captureLeadFromMessage(senderId, userText, platform, {
@@ -4462,6 +4464,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       });
       if (cafeStart.captureOrder) {
         captureOrderFromMessage(senderId, userText, platform, cafeStart.captureOrder);
+      }
+      if (cafeStart.notifyDelivery) {
+        await notifyDeliveryByEmail(senderId, userText, "cafe order delivery details", platform);
       }
       await deliverCustomerReply(senderId, userText, platform, cafeStart.reply, welcomeState);
       return;
