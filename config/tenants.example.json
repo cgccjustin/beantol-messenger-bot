@@ -158,6 +158,7 @@
         "leadCapture": true,
         "orderCapture": true,
         "faithEncouragement": {
+          "_comment_senderIds": "Use quoted strings for Messenger PSIDs (JSON numbers lose precision above 2^53-1).",
           "enabled": true,
           "recipients": [
             {
@@ -170,13 +171,13 @@
               "id": "honey",
               "fullName": "Honey Pearl Reyes",
               "names": ["Honey Pearl Reyes", "Honey Reyes", "Honey Pearl", "Honey"],
-              "senderIds": []
+              "senderIds": ["HONEY_MESSENGER_PSID"]
             },
             {
               "id": "justin",
               "fullName": "Justin Siao",
               "names": ["Justin Siao", "Justin"],
-              "senderIds": []
+              "senderIds": ["JUSTIN_MESSENGER_PSID"]
             }
           ]
         }
