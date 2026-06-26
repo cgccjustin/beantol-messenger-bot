@@ -219,6 +219,7 @@ const {
   isFaithEncouragementEnabled,
   matchFaithEncouragementRecipient,
   matchFaithEncouragementRecipientAsync,
+  rememberFaithProfileFromLead,
   isPersonalOrFaithTopic,
   shouldUseFaithEncouragement,
   shouldSkipFaithEncouragementForMessage,
@@ -1594,6 +1595,7 @@ function queueLeadCapture(payload) {
       payload.platform
     );
     const name = payload.name || profileName || "";
+    rememberFaithProfileFromLead(getActiveTenant(), payload.senderId, name, payload.interest || "");
     const result = await recordLead({ ...payload, name });
     if (!result?.ok || !result.notify) return;
     await notifyLeadByEmail(result.lead, result.isNew);
@@ -4379,7 +4381,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     queueLeadCapture({
       senderId,
       platform,
-      name: profileName || faithRecipient.recipientName,
+      name: profileName || faithRecipient.fullName || faithRecipient.recipientName,
       interest: faithRecipient.persona === "board_exam" ? "board exam encouragement" : "faith encouragement",
       stage: "browsing",
       lastMessage: userText,
