@@ -216,6 +216,12 @@ const {
   isPaymentModeQuestion,
 } = require("./lib/cafe-order-flow");
 const {
+  isChinEncouragementEnabled,
+  isChinSiaoCustomer,
+  resolveChinEncouragementRecipientName,
+  generateChinEncouragementReply,
+} = require("./lib/chin-encouragement");
+const {
   recordOutboundMessage,
   resolveInboundReplyTo,
   hasReplyTag,
@@ -4341,6 +4347,31 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     agentAvailable: isWithinLiveSupportHours(),
     platform,
   });
+
+  if (isChinEncouragementEnabled(tenant) && isChinSiaoCustomer(profileName, senderId)) {
+    const recipientName = resolveChinEncouragementRecipientName(profileName);
+    console.log(
+      `Chin encouragement mode for ${senderId} (profile: ${profileName || "?"}, reply as: ${recipientName})`
+    );
+    const reply = await generateChinEncouragementReply(userText, {
+      profileName: recipientName,
+      history: getChatHistory(senderId),
+      sanitizeHistory: sanitizeMessagesForOpenAi,
+      languageInstruction: getReplyLanguageInstruction(senderId),
+      isFirstWelcome: welcomeState.prependWelcome || welcomeState.isGetStarted,
+    });
+    queueLeadCapture({
+      senderId,
+      platform,
+      name: profileName || "Chin Siao",
+      interest: "board exam encouragement",
+      stage: "browsing",
+      lastMessage: userText,
+      trigger: "chin encouragement",
+    });
+    await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
+    return;
+  }
 
   if (welcomeState.isGetStarted) {
     queueLeadCapture({
