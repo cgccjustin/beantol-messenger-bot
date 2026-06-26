@@ -216,10 +216,9 @@ const {
   isPaymentModeQuestion,
 } = require("./lib/cafe-order-flow");
 const {
-  isChinEncouragementEnabled,
-  isChinSiaoCustomer,
-  resolveChinEncouragementRecipientName,
-  generateChinEncouragementReply,
+  isFaithEncouragementEnabled,
+  matchFaithEncouragementRecipient,
+  generateFaithEncouragementReply,
 } = require("./lib/chin-encouragement");
 const {
   recordOutboundMessage,
@@ -4348,13 +4347,13 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     platform,
   });
 
-  if (isChinEncouragementEnabled(tenant) && isChinSiaoCustomer(profileName, senderId)) {
-    const recipientName = resolveChinEncouragementRecipientName(profileName);
+  const faithRecipient = matchFaithEncouragementRecipient(tenant, profileName, senderId);
+  if (isFaithEncouragementEnabled(tenant) && faithRecipient) {
     console.log(
-      `Chin encouragement mode for ${senderId} (profile: ${profileName || "?"}, reply as: ${recipientName})`
+      `Faith encouragement mode for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "?"}, as: ${faithRecipient.recipientName})`
     );
-    const reply = await generateChinEncouragementReply(userText, {
-      profileName: recipientName,
+    const reply = await generateFaithEncouragementReply(userText, {
+      recipient: faithRecipient,
       history: getChatHistory(senderId),
       sanitizeHistory: sanitizeMessagesForOpenAi,
       languageInstruction: getReplyLanguageInstruction(senderId),
@@ -4363,11 +4362,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     queueLeadCapture({
       senderId,
       platform,
-      name: profileName || "Chin Siao",
-      interest: "board exam encouragement",
+      name: profileName || faithRecipient.recipientName,
+      interest: faithRecipient.persona === "board_exam" ? "board exam encouragement" : "faith encouragement",
       stage: "browsing",
       lastMessage: userText,
-      trigger: "chin encouragement",
+      trigger: "faith encouragement",
     });
     await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
     return;
