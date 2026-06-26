@@ -4667,6 +4667,8 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   const postQuoteFlow = processPostQuoteFlowPreAi(senderId, userText, {
     agentAvailable: isWithinLiveSupportHours(),
     isWeekend: isShopClosedToday(tenant),
+    recentUserTexts: recentUserMessages(senderId, 12),
+    tenant,
   });
   if (postQuoteFlow.handled) {
     if (postQuoteFlow.captureOrder) {
@@ -4981,7 +4983,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           systemMessages.push({ role: "system", content: cafeIdleNote });
         }
       }
-      const postQuoteDigressionNote = buildPostQuoteDigressionSystemNote(senderId, userText);
+      const postQuoteDigressionNote = buildPostQuoteDigressionSystemNote(senderId, userText, tenant);
       if (postQuoteDigressionNote) {
         systemMessages.push({ role: "system", content: postQuoteDigressionNote });
       }
