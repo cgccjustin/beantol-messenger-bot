@@ -4589,7 +4589,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (isCafeOrderFlowEnabled(tenant)) {
-    const recentForCafe = recentUserMessages(senderId, 8);
+    const recentForCafe = recentUserMessages(senderId, 12);
     const cafeStart = tryStartCafeOrderFlow(senderId, userText, tenant, {
       recentUserTexts: recentForCafe,
       isWeekend: isShopClosedToday(tenant),
