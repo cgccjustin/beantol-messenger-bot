@@ -194,11 +194,14 @@ const {
   isCafeOrderFlowEnabled,
   isCafeOrderFlowActive,
   clearCafeOrderSession,
+  stashCafeOrderHints,
   tryStartCafeOrderFlow,
   tryResumeCafeOrderFlow,
   processCafeOrderFlowPreAi,
   buildCafeOrderSystemNote,
+  buildPaymentModeNote,
   getCafeOrderPaymentSummary,
+  isPaymentModeQuestion,
 } = require("./lib/cafe-order-flow");
 const {
   recordOutboundMessage,
@@ -4360,11 +4363,23 @@ async function handleMessage(senderId, userText, platform = "messenger", message
 
   const outOfStockProductReply = buildOutOfStockProductReply(userText);
   if (outOfStockProductReply) {
+    if (isCafeOrderFlowEnabled(tenant)) {
+      stashCafeOrderHints(senderId, userText, recentUserMessages(senderId, 8));
+    }
     captureLeadFromMessage(senderId, userText, platform, {
       interest: matchCatalogFromText(userText)?.label || "out of stock inquiry",
       stage: "browsing",
     });
-    await deliverCustomerReply(senderId, userText, platform, outOfStockProductReply, welcomeState);
+    let oosReply = outOfStockProductReply;
+    if (isCafeOrderFlowEnabled(tenant) && isPaymentModeQuestion(userText)) {
+      oosReply += `\n\n${buildPaymentModeNote(tenant)}`;
+    }
+    const skipGcashQr =
+      isPaymentModeQuestion(userText) &&
+      !/\b(?:gcash|g-cash|qr\s*code|\bqr\b)\b/i.test(userText);
+    await deliverCustomerReply(senderId, userText, platform, oosReply, welcomeState, {
+      skipGcashQr,
+    });
     return;
   }
 
@@ -4456,6 +4471,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       recentUserTexts: recentForCafe,
       isWeekend: isShopClosedToday(tenant),
       agentAvailable: isWithinLiveSupportHours(),
+      lastAssistantReply,
     });
     if (cafeStart.started && cafeStart.reply) {
       captureLeadFromMessage(senderId, userText, platform, {
@@ -4480,6 +4496,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       const cafeFlow = processCafeOrderFlowPreAi(senderId, userText, tenant, {
         agentAvailable: isWithinLiveSupportHours(),
         isWeekend: isShopClosedToday(tenant),
+        recentUserTexts: recentForCafe,
       });
       if (cafeFlow.handled) {
         captureLeadFromMessage(senderId, userText, platform, {
@@ -4500,6 +4517,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     const cafeFlow = processCafeOrderFlowPreAi(senderId, userText, tenant, {
       agentAvailable: isWithinLiveSupportHours(),
       isWeekend: isShopClosedToday(tenant),
+      recentUserTexts: recentForCafe,
     });
     if (cafeFlow.handled) {
       captureLeadFromMessage(senderId, userText, platform, {
@@ -4757,12 +4775,17 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (getGcashQrUrl(tenant) && (isGcashOrPaymentInquiry(userText) || isQrCodeRequest(userText))) {
-    captureLeadFromMessage(senderId, userText, platform, {
-      interest: "GCash payment",
-      stage: "ordering",
-    });
-    await deliverGcashQrPayment(senderId, userText, platform, tenant, welcomeState);
-    return;
+    const paymentModeOnly =
+      isPaymentModeQuestion(userText) &&
+      !/\b(?:gcash|g-cash|qr\s*code|\bqr\b)\b/i.test(userText);
+    if (!paymentModeOnly) {
+      captureLeadFromMessage(senderId, userText, platform, {
+        interest: "GCash payment",
+        stage: "ordering",
+      });
+      await deliverGcashQrPayment(senderId, userText, platform, tenant, welcomeState);
+      return;
+    }
   }
 
   let reply;
@@ -5206,6 +5229,12 @@ async function maybeSendGcashQrImage(senderId, userText, botReply) {
   const tenant = getActiveTenant();
   const qrUrl = getGcashQrUrl(tenant);
   if (!qrUrl || !shouldSendGcashQrImage(userText, botReply, tenant)) return false;
+  if (
+    isPaymentModeQuestion(userText) &&
+    !/\b(?:gcash|g-cash|qr\s*code|\bqr\b)\b/i.test(userText)
+  ) {
+    return false;
+  }
   if (!isGcashOrPaymentInquiry(userText) && !isQrCodeRequest(userText) && shouldSkipGcashQrDuplicate(senderId)) {
     return false;
   }
