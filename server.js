@@ -300,7 +300,8 @@ const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
 
 const HANDOFF_REPLY =
   process.env.HANDOFF_REPLY ||
-  "Got it — I am connecting you with our team. A Beantol team member will reply to you personally here in this chat as soon as they can. Please stay on this thread.";
+  "Got it — I am connecting you with our team. A Beantol team member will reply to you personally here in this chat as soon as they can. Please stay on this thread.\n\n" +
+  "While you wait for a live agent or someone from our team, feel free to keep asking questions — I'm still here to help until they respond.";
 
 const BOT_RESUME_REPLY =
   process.env.BOT_RESUME_REPLY ||
