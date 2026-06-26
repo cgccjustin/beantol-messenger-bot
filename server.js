@@ -194,6 +194,8 @@ const {
   isPostQuoteFlowActive,
   clearPostQuoteSession,
   resumePostQuoteFromRepliedMessage,
+  appendPostQuoteResumeNudge,
+  buildPostQuoteDigressionSystemNote,
 } = require("./lib/post-quote-flow");
 const {
   isCafeOrderFlowEnabled,
@@ -205,7 +207,10 @@ const {
   tryHandleCafeMenuInquiry,
   processCafeOrderFlowPreAi,
   buildCafeOrderSystemNote,
+  buildCafeOrderDigressionSystemNote,
+  buildCafeOrderIdleSystemNote,
   buildMixedProductQuestionNote,
+  appendCafeOrderResumeNudge,
   buildPaymentModeNote,
   getCafeOrderPaymentSummary,
   isPaymentModeQuestion,
@@ -4101,6 +4106,13 @@ async function deliverCustomerReply(senderId, userText, platform, reply, welcome
   message = sanitizeBotReply(message);
   message = applyGcashQrOnlyReplyPolicy(message, getActiveTenant());
   if (!message) return;
+  if (!options.skipCafeOrderNudge && isCafeOrderFlowActive(senderId)) {
+    message = appendCafeOrderResumeNudge(message, senderId, getActiveTenant());
+  }
+  if (!options.skipPostQuoteNudge && isPostQuoteFlowActive(senderId)) {
+    message = appendPostQuoteResumeNudge(message, senderId);
+  }
+  if (!message) return;
   await sendMessageWithFallback(senderId, message);
   if (!options.skipGcashQr) {
     await maybeSendGcashQrImage(senderId, userText, message).catch((err) => {
@@ -4867,9 +4879,22 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       if (gcashQrNote) {
         systemMessages.push({ role: "system", content: gcashQrNote });
       }
-      const cafeOrderNote = buildCafeOrderSystemNote(senderId, tenant);
-      if (cafeOrderNote) {
-        systemMessages.push({ role: "system", content: cafeOrderNote });
+      const digressionNote = buildCafeOrderDigressionSystemNote(senderId, tenant, userText);
+      if (digressionNote) {
+        systemMessages.push({ role: "system", content: digressionNote });
+      } else {
+        const cafeOrderNote = buildCafeOrderSystemNote(senderId, tenant);
+        if (cafeOrderNote) {
+          systemMessages.push({ role: "system", content: cafeOrderNote });
+        }
+        const cafeIdleNote = buildCafeOrderIdleSystemNote(senderId, tenant);
+        if (cafeIdleNote) {
+          systemMessages.push({ role: "system", content: cafeIdleNote });
+        }
+      }
+      const postQuoteDigressionNote = buildPostQuoteDigressionSystemNote(senderId, userText);
+      if (postQuoteDigressionNote) {
+        systemMessages.push({ role: "system", content: postQuoteDigressionNote });
       }
       const mixedProductNote = buildMixedProductQuestionNote(userText, tenant);
       if (mixedProductNote) {
