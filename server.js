@@ -43,6 +43,11 @@ const {
 } = require("./lib/shop-hours-inquiry");
 const { isKnowledgeFaqInquiry, buildKnowledgeFaqReply } = require("./lib/knowledge-faq-inquiry");
 const {
+  isHowToOrderInquiry,
+  buildHowToOrderReply,
+  isCafeHowToOrderEnabled,
+} = require("./lib/how-to-order-inquiry");
+const {
   messageHasImageAttachment,
   resolvePaymentProofSubmission,
   markPaymentProofHandled,
@@ -4760,6 +4765,18 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     });
     await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
     return;
+  }
+
+  if (isCafeHowToOrderEnabled(tenant) && isHowToOrderInquiry(userText, tenant)) {
+    const reply = buildHowToOrderReply(tenant);
+    if (reply) {
+      captureLeadFromMessage(senderId, userText, platform, {
+        interest: "how to order",
+        stage: "browsing",
+      });
+      await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
+      return;
+    }
   }
 
   if (isKnowledgeFaqInquiry(userText)) {

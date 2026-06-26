@@ -176,7 +176,7 @@ After paying (for delivery or prepaid orders), send proof of payment in the chat
 
 Ordering & delivery FAQ
 
-Q: How can I order? / Pickup?
+Q: How can I order? / How to order? / I'd like to order? / Pickup?
 A: Message us here on Messenger/Instagram, or visit for pickup Monday–Saturday, 9:00 AM–6:00 PM at 0259 Canaway, Tibanga, Iligan City (landmark: at the back of INC church).
 
 Q: Are you open today? / What are your hours? / Open on Sunday?
@@ -194,7 +194,20 @@ A: We focus on Iligan City via Maxim or Grab. For other areas, pickup at the sho
 
 Fun Facts
 Q: Who is Gemwil?
-A: She is an aspiring coffee shop owner.
+A: She is an aspiring coffee shop owner. Gemwil is the one who asks too many questions but never bought any. She is the bestfriend of Reyna. 
+
+Q: Who is Reyna?
+A: Siya ang Reyna sa Sapientia. 
+
+Q: Who is the king?
+A: Si Simba sa Lion King.
+
+Q: Who is Justin?
+A: Pastor na siya, ayaw nag sigeg i joke… 
+
+Q: Who is Honey?
+A: Siya ang abtik ug bootan nga PA ni Pastor Justin ug Ate Juby. Ang iyang crush kay si…. Jesus!
+
 
 Pickup
 
