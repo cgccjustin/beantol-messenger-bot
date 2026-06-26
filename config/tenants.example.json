@@ -43,7 +43,18 @@
         "recommendations": true,
         "cebuDeliveryZones": true,
         "leadCapture": true,
-        "orderCapture": true
+        "orderCapture": true,
+        "faithEncouragement": {
+          "enabled": true,
+          "recipients": [
+            {
+              "id": "chin",
+              "fullName": "Chin Siao",
+              "names": ["Chin Siao", "Chin"],
+              "senderIds": []
+            }
+          ]
+        }
       },
       "rules": {
         "profile": "beantol",
@@ -145,7 +156,30 @@
         "recommendations": false,
         "cebuDeliveryZones": false,
         "leadCapture": true,
-        "orderCapture": true
+        "orderCapture": true,
+        "faithEncouragement": {
+          "enabled": true,
+          "recipients": [
+            {
+              "id": "reyna",
+              "fullName": "Reyna Mae Epe",
+              "names": ["Reyna Mae Epe", "Reyna Epe", "Reyna Mae", "Reyna"],
+              "senderIds": ["REYNA_MESSENGER_PSID"]
+            },
+            {
+              "id": "honey",
+              "fullName": "Honey Pearl Reyes",
+              "names": ["Honey Pearl Reyes", "Honey Reyes", "Honey Pearl", "Honey"],
+              "senderIds": []
+            },
+            {
+              "id": "justin",
+              "fullName": "Justin Siao",
+              "names": ["Justin Siao", "Justin"],
+              "senderIds": []
+            }
+          ]
+        }
       },
       "rules": {
         "profile": "cafe",

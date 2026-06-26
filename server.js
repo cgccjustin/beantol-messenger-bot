@@ -218,6 +218,9 @@ const {
 const {
   isFaithEncouragementEnabled,
   matchFaithEncouragementRecipient,
+  matchFaithEncouragementRecipientAsync,
+  isPersonalOrFaithTopic,
+  shouldUseFaithEncouragement,
   shouldSkipFaithEncouragementForMessage,
   generateFaithEncouragementReply,
 } = require("./lib/chin-encouragement");
@@ -4348,11 +4351,20 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     platform,
   });
 
-  const faithRecipient = matchFaithEncouragementRecipient(tenant, profileName, senderId);
+  const faithRecipient = await matchFaithEncouragementRecipientAsync(tenant, profileName, senderId, {
+    findLeadRow,
+  });
   if (
     isFaithEncouragementEnabled(tenant) &&
-    faithRecipient &&
-    !shouldSkipFaithEncouragementForMessage(userText, tenant, faithRecipient, { senderId })
+    isPersonalOrFaithTopic(userText) &&
+    !faithRecipient
+  ) {
+    console.warn(
+      `Faith topic but no profile match for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "unknown"}) — set FAITH_ENCOURAGEMENT_SENDER_IDS or features.faithEncouragement.recipients senderIds in tenant config.`
+    );
+  }
+  if (
+    shouldUseFaithEncouragement(tenant, faithRecipient, userText, { senderId })
   ) {
     console.log(
       `Faith encouragement mode for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "?"}, as: ${faithRecipient.recipientName})`
