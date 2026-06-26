@@ -46,6 +46,7 @@
         "orderCapture": true,
         "faithEncouragement": {
           "enabled": true,
+          "openToAll": true,
           "recipients": [
             {
               "id": "chin",
@@ -103,7 +104,12 @@
         "recommendations": false,
         "cebuDeliveryZones": false,
         "leadCapture": true,
-        "orderCapture": true
+        "orderCapture": true,
+        "faithEncouragement": {
+          "enabled": true,
+          "openToAll": true,
+          "recipients": []
+        }
       },
       "rules": {
         "profile": "cafe",
@@ -159,7 +165,9 @@
         "orderCapture": true,
         "faithEncouragement": {
           "_comment_senderIds": "Use quoted strings for Messenger PSIDs (JSON numbers lose precision above 2^53-1).",
+          "_comment_openToAll": "openToAll true = any customer gets faith replies on personal topics; false = roster only.",
           "enabled": true,
+          "openToAll": true,
           "recipients": [
             {
               "id": "reyna",

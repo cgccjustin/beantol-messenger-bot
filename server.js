@@ -223,6 +223,8 @@ const {
 } = require("./lib/cafe-order-flow");
 const {
   isFaithEncouragementEnabled,
+  isFaithEncouragementOpenToAll,
+  buildGenericFaithRecipient,
   matchFaithEncouragementRecipient,
   matchFaithEncouragementRecipientAsync,
   rememberFaithProfileFromLead,
@@ -4360,26 +4362,36 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     platform,
   });
 
-  const faithRecipient = await matchFaithEncouragementRecipientAsync(tenant, profileName, senderId, {
+  const faithOpenToAll = isFaithEncouragementOpenToAll(tenant);
+  const rosterFaithRecipient = await matchFaithEncouragementRecipientAsync(tenant, profileName, senderId, {
     findLeadRow,
   });
   if (
     isFaithEncouragementEnabled(tenant) &&
+    !faithOpenToAll &&
     isPersonalOrFaithTopic(userText) &&
-    !faithRecipient
+    !rosterFaithRecipient
   ) {
     console.warn(
-      `Faith topic but no profile match for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "unknown"}) — set FAITH_ENCOURAGEMENT_SENDER_IDS or features.faithEncouragement.recipients senderIds in tenant config.`
+      `Faith topic but no profile match for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "unknown"}) — set FAITH_ENCOURAGEMENT_SENDER_IDS, features.faithEncouragement.recipients senderIds, or FAITH_ENCOURAGEMENT_OPEN_TO_ALL=true.`
     );
   }
+  const faithRecipient =
+    rosterFaithRecipient ||
+    (faithOpenToAll ? buildGenericFaithRecipient(tenant, profileName) : null);
   if (
-    shouldUseFaithEncouragement(tenant, faithRecipient, userText, { senderId })
+    shouldUseFaithEncouragement(tenant, faithRecipient, userText, {
+      senderId,
+      profileName,
+      rosterRecipient: rosterFaithRecipient,
+    })
   ) {
+    const replyRecipient = rosterFaithRecipient || faithRecipient;
     console.log(
-      `Faith encouragement mode for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "?"}, as: ${faithRecipient.recipientName})`
+      `Faith encouragement mode for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "?"}, as: ${replyRecipient.recipientName}${faithOpenToAll && !rosterFaithRecipient ? ", openToAll" : ""})`
     );
     const reply = await generateFaithEncouragementReply(userText, {
-      recipient: faithRecipient,
+      recipient: replyRecipient,
       history: getChatHistory(senderId),
       sanitizeHistory: sanitizeMessagesForOpenAi,
       languageInstruction: getReplyLanguageInstruction(senderId),
@@ -4388,8 +4400,13 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     queueLeadCapture({
       senderId,
       platform,
-      name: profileName || faithRecipient.fullName || faithRecipient.recipientName,
-      interest: faithRecipient.persona === "board_exam" ? "board exam encouragement" : "faith encouragement",
+      name: profileName || replyRecipient.fullName || replyRecipient.recipientName,
+      interest:
+        replyRecipient.persona === "board_exam"
+          ? "board exam encouragement"
+          : faithOpenToAll && !rosterFaithRecipient
+            ? "faith encouragement (open)"
+            : "faith encouragement",
       stage: "browsing",
       lastMessage: userText,
       trigger: "faith encouragement",
