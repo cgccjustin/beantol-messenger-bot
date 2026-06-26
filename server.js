@@ -218,6 +218,7 @@ const {
 const {
   isFaithEncouragementEnabled,
   matchFaithEncouragementRecipient,
+  shouldSkipFaithEncouragementForMessage,
   generateFaithEncouragementReply,
 } = require("./lib/chin-encouragement");
 const {
@@ -4348,7 +4349,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   });
 
   const faithRecipient = matchFaithEncouragementRecipient(tenant, profileName, senderId);
-  if (isFaithEncouragementEnabled(tenant) && faithRecipient) {
+  if (
+    isFaithEncouragementEnabled(tenant) &&
+    faithRecipient &&
+    !shouldSkipFaithEncouragementForMessage(userText, tenant, faithRecipient, { senderId })
+  ) {
     console.log(
       `Faith encouragement mode for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "?"}, as: ${faithRecipient.recipientName})`
     );
