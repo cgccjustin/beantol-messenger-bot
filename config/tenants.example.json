@@ -194,6 +194,62 @@
         "profile": "cafe",
         "extra": ""
       }
+    },
+    {
+      "id": "destiny",
+      "name": "Destiny",
+      "enabled": false,
+      "_comment_enabled": "Set enabled: true after Facebook Page + Page Access Token are ready. No webhook subscription needed until then.",
+      "meta": {
+        "pageId": "YOUR_DESTINY_PAGE_NUMERIC_ID",
+        "pageAccessToken": "YOUR_DESTINY_PAGE_ACCESS_TOKEN",
+        "instagramAccountId": "",
+        "instagramUsername": ""
+      },
+      "google": {
+        "knowledgeDocIds": "YOUR_DESTINY_GOOGLE_DOC_ID:destiny-knowledge",
+        "leadsSheetId": "YOUR_DESTINY_GOOGLE_SHEET_ID",
+        "leadsSheetTab": "Leads",
+        "ordersSheetTab": "",
+        "quotesSheetTab": "",
+        "appointmentsSheetTab": "",
+        "inventorySheetTab": "",
+        "eventsSheetTab": ""
+      },
+      "notify": {
+        "handoffEmail": "",
+        "leadEmail": "",
+        "orderEmail": ""
+      },
+      "shop": {
+        "address": "",
+        "hours": ""
+      },
+      "branding": {
+        "businessName": "Destiny",
+        "handoffReply": "",
+        "botResumeReply": "",
+        "handoffCatchUpApology": ""
+      },
+      "features": {
+        "appointments": false,
+        "quotes": false,
+        "recommendations": false,
+        "cebuDeliveryZones": false,
+        "leadCapture": true,
+        "orderCapture": false,
+        "faithEncouragement": {
+          "_comment": "faithOnly: true means ALL messages (not just personal topics) are answered with faith encouragement.",
+          "enabled": true,
+          "openToAll": true,
+          "faithOnly": true,
+          "recipients": []
+        }
+      },
+      "rules": {
+        "profile": "faith",
+        "extra": ""
+      }
     }
   ]
 }

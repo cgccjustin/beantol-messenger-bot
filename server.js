@@ -229,9 +229,12 @@ const {
   matchFaithEncouragementRecipientAsync,
   rememberFaithProfileFromLead,
   isPersonalOrFaithTopic,
+  isFaithOnlyTenant,
   shouldUseFaithEncouragement,
   shouldSkipFaithEncouragementForMessage,
   generateFaithEncouragementReply,
+  classifyFirstFaithMessage,
+  buildFirstContactProbeReply,
 } = require("./lib/chin-encouragement");
 const {
   recordOutboundMessage,
@@ -4366,24 +4369,74 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   const rosterFaithRecipient = await matchFaithEncouragementRecipientAsync(tenant, profileName, senderId, {
     findLeadRow,
   });
-  if (
-    isFaithEncouragementEnabled(tenant) &&
-    !faithOpenToAll &&
-    isPersonalOrFaithTopic(userText) &&
-    !rosterFaithRecipient
-  ) {
-    console.warn(
-      `Faith topic but no profile match for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "unknown"}) — set FAITH_ENCOURAGEMENT_SENDER_IDS, features.faithEncouragement.recipients senderIds, or FAITH_ENCOURAGEMENT_OPEN_TO_ALL=true.`
-    );
-  }
   const faithRecipient =
     rosterFaithRecipient ||
     (faithOpenToAll ? buildGenericFaithRecipient(tenant, profileName) : null);
+
+  // ── First-contact gate ────────────────────────────────────────────────────
+  // On a customer's very first message (new session / Get Started), use
+  // discretion before committing to faith mode:
+  //   • Pure greeting       → normal business bot (they may just want to order)
+  //   • Ambiguous request   → probe: "business or personal?" and wait for reply
+  //   • Clear personal/faith topic → proceed to faith with brand intro below
+  // Faith-only tenants (Destiny) skip this gate — every message is faith.
+  const isFirstContact = !isFaithOnlyTenant(tenant) &&
+    isFaithEncouragementEnabled(tenant) &&
+    (welcomeState.prependWelcome || welcomeState.isGetStarted);
+
+  let skipFaithThisTurn = false;
+  if (isFirstContact) {
+    const firstAction = classifyFirstFaithMessage(userText, tenant);
+    if (firstAction === "probe") {
+      const probeReply = buildFirstContactProbeReply(tenant, profileName);
+      console.log(`Faith first-contact probe for ${senderId} (tenant: ${tenant.id})`);
+      queueLeadCapture({
+        senderId,
+        platform,
+        name: profileName || "",
+        interest: "new chat",
+        stage: "browsing",
+        lastMessage: userText,
+        trigger: "faith probe",
+      });
+      await deliverCustomerReply(senderId, userText, platform, probeReply, welcomeState);
+      return;
+    }
+    if (firstAction === "business") {
+      // Pure greeting on first contact → send welcome reply and stop.
+      if (welcomeState.isGetStarted || (isGreetingOnly(userText) && welcomeState.prependWelcome)) {
+        queueLeadCapture({
+          senderId,
+          platform,
+          name: profileName || "",
+          interest: "new chat",
+          stage: "browsing",
+          lastMessage: userText,
+          trigger: "greeting",
+        });
+        await deliverCustomerReply(
+          senderId,
+          userText,
+          platform,
+          welcomeOnlyReply(senderId, welcomeState),
+          welcomeState
+        );
+        return;
+      }
+      // First-contact business keyword → skip faith, fall through to business bot.
+      skipFaithThisTurn = true;
+    }
+    // firstAction === "faith" → fall through to shouldUseFaithEncouragement below
+  }
+  // ── End first-contact gate ────────────────────────────────────────────────
+
   if (
+    !skipFaithThisTurn &&
     shouldUseFaithEncouragement(tenant, faithRecipient, userText, {
       senderId,
       profileName,
       rosterRecipient: rosterFaithRecipient,
+      isFirstContact,
     })
   ) {
     const replyRecipient = rosterFaithRecipient || faithRecipient;
