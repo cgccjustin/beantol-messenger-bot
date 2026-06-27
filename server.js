@@ -233,8 +233,10 @@ const {
   shouldUseFaithEncouragement,
   shouldSkipFaithEncouragementForMessage,
   generateFaithEncouragementReply,
+  isAmbiguousHelpRequest,
   classifyFirstFaithMessage,
   buildFirstContactProbeReply,
+  buildOngoingProbeReply,
 } = require("./lib/chin-encouragement");
 const {
   recordOutboundMessage,
@@ -4428,7 +4430,36 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     }
     // firstAction === "faith" → fall through to shouldUseFaithEncouragement below
   }
-  // ── End first-contact gate ────────────────────────────────────────────────
+
+  // ── Ongoing ambiguous probe ───────────────────────────────────────────────
+  // Fires on any turn (not just first contact) when the message is a vague
+  // help request that could be business OR personal. Ask before committing.
+  // Does not fire when: a business keyword is present (→ business bot),
+  // a clear faith/personal topic is present (→ faith), or an order is active.
+  if (
+    !skipFaithThisTurn &&
+    !isFirstContact &&
+    !isFaithOnlyTenant(tenant) &&
+    isFaithEncouragementEnabled(tenant) &&
+    isAmbiguousHelpRequest(userText) &&
+    !isPersonalOrFaithTopic(userText) &&
+    !shouldSkipFaithEncouragementForMessage(userText, tenant, faithRecipient, { senderId })
+  ) {
+    const probeReply = buildOngoingProbeReply(tenant, profileName);
+    console.log(`Faith ongoing probe for ${senderId} (tenant: ${tenant.id})`);
+    queueLeadCapture({
+      senderId,
+      platform,
+      name: profileName || "",
+      interest: "new chat",
+      stage: "browsing",
+      lastMessage: userText,
+      trigger: "faith probe",
+    });
+    await deliverCustomerReply(senderId, userText, platform, probeReply, welcomeState);
+    return;
+  }
+  // ── End ongoing ambiguous probe ───────────────────────────────────────────
 
   if (
     !skipFaithThisTurn &&
