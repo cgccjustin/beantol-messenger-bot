@@ -202,6 +202,7 @@ const {
   resumePostQuoteFromRepliedMessage,
   appendPostQuoteResumeNudge,
   buildPostQuoteDigressionSystemNote,
+  buildFaithPostQuoteNudge,
 } = require("./lib/post-quote-flow");
 const {
   isCafeOrderFlowEnabled,
@@ -215,6 +216,7 @@ const {
   buildCafeOrderSystemNote,
   buildCafeOrderDigressionSystemNote,
   buildCafeOrderIdleSystemNote,
+  buildFaithPendingNudge,
   buildMixedProductQuestionNote,
   appendCafeOrderResumeNudge,
   buildPaymentModeNote,
@@ -4474,13 +4476,20 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     console.log(
       `Faith encouragement mode for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "?"}, as: ${replyRecipient.recipientName}${faithOpenToAll && !rosterFaithRecipient ? ", openToAll" : ""})`
     );
-    const reply = await generateFaithEncouragementReply(userText, {
+    let reply = await generateFaithEncouragementReply(userText, {
       recipient: replyRecipient,
       history: getChatHistory(senderId),
       sanitizeHistory: sanitizeMessagesForOpenAi,
       languageInstruction: getReplyLanguageInstruction(senderId),
       isFirstWelcome: welcomeState.prependWelcome || welcomeState.isGetStarted,
     });
+
+    // Append a gentle pending-order nudge if the customer has a stalled session.
+    const pendingNudge =
+      buildFaithPendingNudge(senderId, tenant) ||
+      buildFaithPostQuoteNudge(senderId);
+    if (pendingNudge) reply = reply + pendingNudge;
+
     queueLeadCapture({
       senderId,
       platform,
