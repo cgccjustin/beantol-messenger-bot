@@ -203,10 +203,13 @@ const {
   appendPostQuoteResumeNudge,
   buildPostQuoteDigressionSystemNote,
   buildFaithPostQuoteNudge,
+  buildActivePostQuoteFaithNudge,
+  isPostQuoteFlowRecentlyActive,
 } = require("./lib/post-quote-flow");
 const {
   isCafeOrderFlowEnabled,
   isCafeOrderFlowActive,
+  isCafeOrderFlowRecentlyActive,
   clearCafeOrderSession,
   stashCafeOrderHints,
   tryStartCafeOrderFlow,
@@ -217,6 +220,7 @@ const {
   buildCafeOrderDigressionSystemNote,
   buildCafeOrderIdleSystemNote,
   buildFaithPendingNudge,
+  buildActiveOrderFaithNudge,
   buildMixedProductQuestionNote,
   appendCafeOrderResumeNudge,
   buildPaymentModeNote,
@@ -4463,6 +4467,35 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
   // ── End ongoing ambiguous probe ───────────────────────────────────────────
 
+  // ── Active-order faith override ───────────────────────────────────────────
+  // When there is a recently-active order/quote session AND the current message
+  // is pure personal/faith (no business keywords), faith fires with an order nudge
+  // appended — instead of blocking faith entirely and routing to the business bot.
+  // Mixed messages (order progress + faith) still go to the business AI so order
+  // progress is reliably captured first.
+  let allowDespiteActiveOrder = false;
+  let activeOrderFaithNudge = "";
+  if (
+    !skipFaithThisTurn &&
+    !isFaithOnlyTenant(tenant) &&
+    isFaithEncouragementEnabled(tenant) &&
+    isPersonalOrFaithTopic(userText) &&
+    (isCafeOrderFlowRecentlyActive(senderId) || isPostQuoteFlowRecentlyActive(senderId))
+  ) {
+    // Verify no business keywords are present (pure faith message).
+    const wouldSkipForBusiness = shouldSkipFaithEncouragementForMessage(
+      userText, tenant, faithRecipient || { recipientName: "friend" },
+      { senderId, allowDespiteActiveOrder: true }
+    );
+    if (!wouldSkipForBusiness) {
+      allowDespiteActiveOrder = true;
+      activeOrderFaithNudge =
+        buildActiveOrderFaithNudge(senderId, tenant) ||
+        buildActivePostQuoteFaithNudge(senderId);
+    }
+  }
+  // ── End active-order faith override ──────────────────────────────────────
+
   if (
     !skipFaithThisTurn &&
     shouldUseFaithEncouragement(tenant, faithRecipient, userText, {
@@ -4470,11 +4503,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       profileName,
       rosterRecipient: rosterFaithRecipient,
       isFirstContact,
+      allowDespiteActiveOrder,
     })
   ) {
     const replyRecipient = rosterFaithRecipient || faithRecipient;
     console.log(
-      `Faith encouragement mode for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "?"}, as: ${replyRecipient.recipientName}${faithOpenToAll && !rosterFaithRecipient ? ", openToAll" : ""})`
+      `Faith encouragement mode for ${senderId} (tenant: ${tenant.id}, profile: ${profileName || "?"}, as: ${replyRecipient.recipientName}${faithOpenToAll && !rosterFaithRecipient ? ", openToAll" : ""}${allowDespiteActiveOrder ? ", activeOrderOverride" : ""})`
     );
     let reply = await generateFaithEncouragementReply(userText, {
       recipient: replyRecipient,
@@ -4484,8 +4518,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       isFirstWelcome: welcomeState.prependWelcome || welcomeState.isGetStarted,
     });
 
-    // Append a gentle pending-order nudge if the customer has a stalled session.
+    // Append a gentle pending-order nudge if the customer has a pending session.
+    // Active sessions use the active-order nudge (built above); idle sessions
+    // use the stalled-session nudge.
     const pendingNudge =
+      activeOrderFaithNudge ||
       buildFaithPendingNudge(senderId, tenant) ||
       buildFaithPostQuoteNudge(senderId);
     if (pendingNudge) reply = reply + pendingNudge;
