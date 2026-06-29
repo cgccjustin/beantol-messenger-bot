@@ -4387,7 +4387,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   //   • Pure greeting       → normal business bot (they may just want to order)
   //   • Ambiguous request   → probe: "business or personal?" and wait for reply
   //   • Clear personal/faith topic → proceed to faith with brand intro below
-  // Faith-only tenants (Destiny) skip this gate — every message is faith.
+  // Faith-only tenants (Charity) skip this gate — every message is faith.
   const isFirstContact = !isFaithOnlyTenant(tenant) &&
     isFaithEncouragementEnabled(tenant) &&
     (welcomeState.prependWelcome || welcomeState.isGetStarted);

@@ -196,19 +196,20 @@
       }
     },
     {
-      "id": "destiny",
-      "name": "Destiny",
+      "id": "charity",
+      "name": "Charity",
+      "slogan": "A Voice of Hope",
       "enabled": false,
       "_comment_enabled": "Set enabled: true after Facebook Page + Page Access Token are ready. No webhook subscription needed until then.",
       "meta": {
-        "pageId": "YOUR_DESTINY_PAGE_NUMERIC_ID",
-        "pageAccessToken": "YOUR_DESTINY_PAGE_ACCESS_TOKEN",
+        "pageId": "YOUR_CHARITY_PAGE_NUMERIC_ID",
+        "pageAccessToken": "YOUR_CHARITY_PAGE_ACCESS_TOKEN",
         "instagramAccountId": "",
         "instagramUsername": ""
       },
       "google": {
-        "knowledgeDocIds": "YOUR_DESTINY_GOOGLE_DOC_ID:destiny-knowledge",
-        "leadsSheetId": "YOUR_DESTINY_GOOGLE_SHEET_ID",
+        "knowledgeDocIds": "YOUR_CHARITY_GOOGLE_DOC_ID:charity-knowledge",
+        "leadsSheetId": "YOUR_CHARITY_GOOGLE_SHEET_ID",
         "leadsSheetTab": "Leads",
         "ordersSheetTab": "",
         "quotesSheetTab": "",
@@ -226,7 +227,8 @@
         "hours": ""
       },
       "branding": {
-        "businessName": "Destiny",
+        "businessName": "Charity",
+        "slogan": "A Voice of Hope",
         "handoffReply": "",
         "botResumeReply": "",
         "handoffCatchUpApology": ""
