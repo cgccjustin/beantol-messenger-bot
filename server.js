@@ -4373,6 +4373,13 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     platform,
   });
 
+  // Faith-only tenants (Charity) generate their own greeting inside the faith reply.
+  // Suppress the business welcome so it doesn't prepend.
+  if (isFaithOnlyTenant(tenant)) {
+    welcomeState.prependWelcome = false;
+    welcomeState.done = true;
+  }
+
   const faithOpenToAll = isFaithEncouragementOpenToAll(tenant);
   const rosterFaithRecipient = await matchFaithEncouragementRecipientAsync(tenant, profileName, senderId, {
     findLeadRow,
