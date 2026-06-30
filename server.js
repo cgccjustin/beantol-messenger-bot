@@ -927,16 +927,19 @@ function wantsHumanHandoff(text, senderId) {
 
 function sanitizeBotReply(text) {
   let out = text.trim();
+  // Strip Messenger-redirect phrases — also eat any preceding ", or" / " or" / ", and" to avoid dangling conjunctions.
   const stripPatterns = [
-    /call (?:us|me)(?:\s+on|\s+in)?\s*messenger[^\n]*/gi,
-    /message us(?:\s+on)?\s*messenger[^\n]*/gi,
-    /contact us(?:\s+on)?\s*messenger[^\n]*/gi,
+    /(?:\s*,?\s*(?:or|and)\s+)?call (?:us|me)(?:\s+on|\s+in)?\s*messenger[^\n]*/gi,
+    /(?:\s*,?\s*(?:or|and)\s+)?message us(?:\s+on)?\s*messenger[^\n]*/gi,
+    /(?:\s*,?\s*(?:or|and)\s+)?contact us(?:\s+on)?\s*messenger[^\n]*/gi,
     /(?:tap|click)\s+(?:the\s+)?button[^\n]*/gi,
-    /send (?:us\s+)?a message(?:\s+on messenger)?[^\n]*/gi,
+    /(?:\s*,?\s*(?:or|and)\s+)?send (?:us\s+)?a message(?:\s+on messenger)?[^\n]*/gi,
   ];
   for (const pattern of stripPatterns) {
     out = out.replace(pattern, "");
   }
+  // Clean up any dangling conjunctions left at end of a line after stripping (e.g. "..., or" / "... or" / "... and").
+  out = out.replace(/\s*,?\s*\b(?:or|and|but)\s*$/gm, "");
   out = fixMisplacedPesoOnPhoneNumbers(out);
   return out.replace(/\n{3,}/g, "\n\n").replace(/  +/g, " ").trim() || text.trim();
 }
