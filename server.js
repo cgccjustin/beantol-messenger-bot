@@ -5212,8 +5212,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
             `FINAL INVENTORY OVERRIDE (overrides any product list in KNOWLEDGE CONTEXT above):\n` +
             `IN STOCK right now: ${_postRagInStock.join(", ")}.\n` +
             `${_postRagOosLine}\n` +
-            `If the customer asked what beans you carry or what is available — use ONLY the IN STOCK list above. ` +
-            `Do NOT copy any product list, origin list, or catalog from the KNOWLEDGE CONTEXT.`,
+            `Rules:\n` +
+            `1. If asked what beans you carry or what is available — list ONLY the IN STOCK beans above. Do NOT copy any product list from KNOWLEDGE CONTEXT.\n` +
+            `2. NEVER quote prices, sizes, or availability for any OUT OF STOCK bean — even if the customer names it directly. Acknowledge it is out of stock and suggest an IN STOCK alternative.\n` +
+            `3. Do not tell the customer to "ask the bot" — you ARE the bot. Answer directly.`,
         });
       }
       const sizeNote = buildPendingSizeConfirmationNote(senderId, userText);
@@ -5287,10 +5289,15 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           "Guji (filter)": "fruity, floral",
           "Kenya (filter)": "bright, berry, citrus",
         };
+        // Also catch "just ask the bot" circular replies — bot already IS the bot being asked
+        const isCircularAskBot =
+          /just ask the bot\b|ask the bot for/i.test(reply) &&
+          resolveProfile(tenant) !== "cafe";
+
         const isDeflectionMisfire =
-          (/cupping\s+sessions?/i.test(reply) || /shop\s+visits?\s+Mon/i.test(reply)) &&
+          (/cupping\s+sessions?/i.test(reply) || /shop\s+visits?\s+Mon/i.test(reply) || isCircularAskBot) &&
           !/\b(?:caf[eé]|wholesale|bulk|6\s*kg|business|shop\s+owner|barista\s+training)\b/i.test(userText) &&
-          resolveProfile(tenant) !== "cafe"; // café tenants legitimately discuss cupping for B2B
+          resolveProfile(tenant) !== "cafe";
         if (isDeflectionMisfire) {
           const { labels: _cuppingOos } = parseUnavailableProductLabels();
           const _cuppingOutSet = new Set(_cuppingOos);
@@ -5379,11 +5386,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       } catch (oosListGuardErr) {
         console.warn("OOS-list guard:", oosListGuardErr.message);
       }
-      // Secondary OOS guard: if the AI reply still quotes a price (₱ or size) within
-      // 120 chars of an out-of-stock bean name, replace with a clarifying response.
-      // This catches cases where the existing policy misses (e.g. no bean in user text).
+      // Secondary OOS guard: if the AI reply quotes a price (₱ or size) next to an OOS bean,
+      // replace with a clarifying response. Runs unconditionally — not gated on inventory config.
       try {
-        if (shouldInjectInventoryForChat(tenant)) {
+        {
           const { labels: _oosLabels } = parseUnavailableProductLabels();
           if (_oosLabels.length) {
             const replyLower = reply.toLowerCase();
