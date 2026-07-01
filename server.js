@@ -5188,6 +5188,28 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           content: getEquipmentSalesSystemNote(),
         });
       }
+      // Standing availability hint — language-agnostic. Injected whenever Beantol has OOS
+      // items so the AI knows what to do for ANY "what beans do you have?" question regardless
+      // of whether it is in English, Tagalog, Cebuano, or a mix.
+      if (shouldInjectInventoryForChat(tenant) && resolveProfile(tenant) === "beantol") {
+        const { labels: _availOos } = parseUnavailableProductLabels();
+        if (_availOos.length) {
+          const _availOutSet = new Set(_availOos);
+          const _availInStock = getCatalogProducts(tenant)
+            .filter((p) => !_availOutSet.has(p.label))
+            .map((p) => p.label);
+          systemMessages.push({
+            role: "system",
+            content:
+              `AVAILABILITY REMINDER (applies to any language — English, Tagalog, Cebuano, or mixed): ` +
+              `If the customer is asking what beans you carry, what is available, what is in stock, or any similar general catalog question — ` +
+              `list ONLY these IN STOCK beans: ${_availInStock.join(", ")}. ` +
+              `Do NOT mention ${_availOos.join(", ")} — they are OUT OF STOCK. ` +
+              `Do NOT deflect to cupping sessions, Zeke's contact, or shop visit suggestions for a simple "what do you have?" question. ` +
+              `Answer the availability question directly and concisely first.`,
+          });
+        }
+      }
       if (hasImageAttachment && paymentResolution.action === "none") {
         systemMessages.push({
           role: "system",
