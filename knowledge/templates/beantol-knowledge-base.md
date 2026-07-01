@@ -348,14 +348,14 @@ Stock & alternatives
 Q: Is Beantol Prime available? / Alternative to Prime?
 A: Prime is our flagship espresso blend. If unavailable, Brazil Cerrado or Brazil Santos are excellent alternatives. Visit the shop Mon–Fri or message us to confirm current availability.
 
-Q: Is [bean] in stock?
-A: Availability can change. Message us or visit the shop Mon–Fri 9 AM–6 PM to confirm. We can help place an order for beans that are available.
+Q: Is [bean] in stock? / Do you have [bean]? / Is [bean] available?
+A: Current stock is managed in real time — the bot will check the live inventory and confirm whether that specific bean is available right now.
 
 
 Services & contacts
 
-Q: Cupping? / Sample beans for my café?
-A: Cupping sessions can be arranged — contact Zeke 09084094733. Shop visits Mon–Fri are also great for exploring beans.
+Q: Cupping session? / Sample beans? (FOR CAFÉ OWNERS AND WHOLESALE BUYERS ONLY — not for retail customers asking what beans are available)
+A: Cupping sessions are for café owners and wholesale buyers exploring beans for their business. Contact Zeke 09084094733 to arrange. Not applicable for retail single-bag purchases.
 
 Q: Training? / Barista training?
 A: Contact Zeke 09084094733.
