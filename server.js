@@ -5161,12 +5161,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           systemMessages.push({
             role: "system",
             content:
-              `AVAILABILITY REMINDER (applies to any language — English, Tagalog, Cebuano, or mixed):\n` +
-              `• "What do you have / Unsay Naa / Ano ang meron / What's available?" → list ALL IN STOCK beans: ${_availInStock.join(", ")}.\n` +
-              `• "What's not available / Unsay wala / Ano ang wala / What's out of stock?" → list ALL OUT OF STOCK beans: ${_availOos.join(", ")}. List every single one — do NOT omit any.\n` +
-              `• For any general availability question, answer directly and concisely. Do NOT deflect to cupping sessions, Zeke's contact, or shop visits.\n` +
-              `COMPLETE OUT OF STOCK list (authoritative): ${_availOos.join(", ")}.\n` +
-              `COMPLETE IN STOCK list (authoritative): ${_availInStock.join(", ")}.`,
+              `INVENTORY (complete — use this to answer any availability question in any language):\n` +
+              `IN STOCK: ${_availInStock.join(", ")}.\n` +
+              `OUT OF STOCK: ${_availOos.join(", ")}.\n` +
+              `When the customer asks anything about what you carry, what is available, what is not available, or what is out of stock — understand their intent from context and answer using these two lists. ` +
+              `If they are asking what IS available → list IN STOCK. If they are asking what is NOT available / out of stock → list every item in OUT OF STOCK without omitting any. ` +
+              `Do not deflect to cupping sessions, Zeke's contact, or shop visits for a direct availability question.`,
           });
         }
       }
