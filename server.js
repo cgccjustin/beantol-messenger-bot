@@ -5300,19 +5300,36 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           if (_listOos.length) {
             const _listOutSet = new Set(_listOos);
             const replyLower = reply.toLowerCase();
-            // Check if reply mentions an OOS bean without an OOS qualifier nearby
+            // Check if reply mentions an OOS bean (full label OR short alias) without OOS qualifier
+            const OOS_ALIASES = {
+              "Beantol Prime": ["beantol prime", "prime"],
+              "Brazil Santos": ["brazil santos", "santos"],
+              "Guji (filter)": ["guji (filter)", "guji filter", "filter guji"],
+              "Mt. Apo (filter)": ["mt. apo (filter)", "mt apo (filter)", "mt. apo filter"],
+            };
             const oosLabelInReply = _listOos.find((label) => {
-              const idx = replyLower.indexOf(label.toLowerCase());
-              if (idx === -1) return false;
-              const ctx = reply.slice(Math.max(0, idx - 60), idx + label.length + 80);
-              return !/\b(?:out of stock|unavailable|not available|currently out|wala na|wala)\b/i.test(ctx);
+              const aliases = OOS_ALIASES[label] || [label.toLowerCase()];
+              return aliases.some((alias) => {
+                const idx = replyLower.indexOf(alias);
+                if (idx === -1) return false;
+                const ctx = reply.slice(Math.max(0, idx - 60), idx + alias.length + 80);
+                return !/\b(?:out of stock|unavailable|not available|currently out|wala na)\b/i.test(ctx);
+              });
             });
             if (oosLabelInReply) {
               // Also check the reply mentions an in-stock bean — confirms this is a product list
               const _listInStock = getCatalogProducts(tenant).filter((p) => !_listOutSet.has(p.label));
-              const hasInStockMention = _listInStock.some((p) =>
-                replyLower.includes(p.label.toLowerCase())
-              );
+              const IN_STOCK_ALIASES = {
+                "Brazil Cerrado": ["brazil cerrado", "cerrado"],
+                "Ethiopia Guji (espresso)": ["ethiopia guji", "guji"],
+                "Ethiopia Sidama": ["ethiopia sidama", "sidama"],
+                "Mt. Apo (Ellaga)": ["mt. apo (ellaga)", "mt apo ellaga", "ellaga"],
+                "Kenya (filter)": ["kenya (filter)", "kenya filter", "kenya"],
+              };
+              const hasInStockMention = _listInStock.some((p) => {
+                const aliases = IN_STOCK_ALIASES[p.label] || [p.label.toLowerCase()];
+                return aliases.some((a) => replyLower.includes(a));
+              });
               if (hasInStockMention) {
                 const FLAVOR_NOTES_LIST = {
                   "Beantol Prime": "balanced chocolate & fruity blend",
