@@ -1592,6 +1592,21 @@ function recentUserMessages(senderId, limit = 5) {
     .slice(-limit);
 }
 
+/**
+ * Returns true when the message is a bare price question ("how much?", "magkano?", etc.)
+ * with no specific bean named in the current text or recent chat history.
+ * Used to intercept before the AI can default to an out-of-stock flagship bean.
+ */
+function isPriceInquiryWithoutBeanContext(userText, senderId) {
+  const PRICE_PATTERN = /^\s*(?:how\s*much|magkano|presyo|price|how\s+much\s+(?:is\s+)?(?:it|that|this)|pila|tag\s*pila)[?!.\s]*$/i;
+  if (!PRICE_PATTERN.test(userText)) return false;
+  // Check if any catalog bean was mentioned in this message or the last 4 user messages
+  const tenant = getActiveTenant();
+  const allText = [userText, ...recentUserMessages(senderId, 4)].join(" ");
+  const matched = matchCatalogFromText(allText, tenant);
+  return !matched; // true = price question with no bean context
+}
+
 function lastAssistantMessage(senderId) {
   const history = getChatHistory(senderId);
   for (let i = history.length - 1; i >= 0; i--) {
@@ -4655,6 +4670,24 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       stage: "browsing",
     });
     await deliverCustomerReply(senderId, userText, platform, inStockAvailabilityReply, welcomeState);
+    return;
+  }
+
+  // Intercept price-without-context: "How much?" / "Magkano?" with no specific bean named
+  // in the current message or recent history. Return a clarifying question instead of
+  // letting the AI default to Beantol Prime (which may be out of stock).
+  if (isRecommendationsEnabled(tenant) && isPriceInquiryWithoutBeanContext(userText, senderId)) {
+    const { labels: outLabels } = parseUnavailableProductLabels();
+    const outSet = new Set(outLabels);
+    const inStock = getCatalogProducts(tenant)
+      .filter((p) => !outSet.has(p.label) && p.retail)
+      .map((p) => p.label);
+    const beanList = inStock.length
+      ? `We currently have: ${inStock.join(", ")}.`
+      : "Let me check what we have available for you.";
+    const clarifyReply =
+      `Which bean are you asking about? ${beanList}\n\nJust name the one you're interested in and I'll share the sizes and prices.`;
+    await deliverCustomerReply(senderId, userText, platform, clarifyReply, welcomeState);
     return;
   }
 
