@@ -149,9 +149,6 @@ const {
   buildRecommendationSystemNote,
 } = require("./lib/recommendations");
 const {
-  buildOutOfStockProductReply,
-  buildInStockTasteRecommendationReply,
-  buildInStockAvailabilityReply,
   enforceOutOfStockProductPolicy,
   filterAlternativesToInStock,
   buildTasteRecommendationInventoryHint,
@@ -4615,49 +4612,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     }
   }
 
-  const outOfStockProductReply = buildOutOfStockProductReply(userText);
-  if (outOfStockProductReply) {
-    if (isCafeOrderFlowEnabled(tenant)) {
-      stashCafeOrderHints(senderId, userText, recentUserMessages(senderId, 8));
-    }
-    captureLeadFromMessage(senderId, userText, platform, {
-      interest: matchCatalogFromText(userText)?.label || "out of stock inquiry",
-      stage: "browsing",
-    });
-    let oosReply = outOfStockProductReply;
-    if (isCafeOrderFlowEnabled(tenant) && isPaymentModeQuestion(userText)) {
-      oosReply += `\n\n${buildPaymentModeNote(tenant)}`;
-    }
-    const skipGcashQr =
-      isPaymentModeQuestion(userText) &&
-      !/\b(?:gcash|g-cash|qr\s*code|\bqr\b)\b/i.test(userText);
-    await deliverCustomerReply(senderId, userText, platform, oosReply, welcomeState, {
-      skipGcashQr,
-    });
-    return;
-  }
-
-  const inStockTasteReply = isRecommendationsEnabled(tenant)
-    ? buildInStockTasteRecommendationReply(userText)
-    : null;
-  if (inStockTasteReply) {
-    captureLeadFromMessage(senderId, userText, platform, {
-      interest: "nutty chocolatey beans",
-      stage: "browsing",
-    });
-    await deliverCustomerReply(senderId, userText, platform, inStockTasteReply, welcomeState);
-    return;
-  }
-
-  const inStockAvailabilityReply = buildInStockAvailabilityReply(userText);
-  if (inStockAvailabilityReply) {
-    captureLeadFromMessage(senderId, userText, platform, {
-      interest: "bean availability",
-      stage: "browsing",
-    });
-    await deliverCustomerReply(senderId, userText, platform, inStockAvailabilityReply, welcomeState);
-    return;
-  }
+  // NOTE: OOS product replies, taste recommendations, and availability replies are no longer
+  // handled by pre-AI canned interceptors. The AI handles all of these intelligently
+  // in any language (English, Tagalog, Cebuano, mixed) via the system hints and context
+  // injected below (buildOutOfStockProductSystemHint, buildTasteRecommendationInventoryHint,
+  // buildCafeMenuListSystemHint, inventoryFirstNote, AVAILABILITY REMINDER).
+  // Output enforcement guards (OOS secondary guard, cupping guard) catch any AI violations.
 
 
   if (
