@@ -1593,18 +1593,30 @@ function recentUserMessages(senderId, limit = 5) {
 }
 
 /**
- * Returns true when the message is a bare price question ("how much?", "magkano?", etc.)
- * with no specific bean named in the current text or recent chat history.
- * Used to intercept before the AI can default to an out-of-stock flagship bean.
+ * Returns true when the message is a bare price question ("how much?", "magkano?", "tagpila?", etc.)
+ * AND either no specific bean is in context OR the bean in context is currently out of stock.
+ * Used to intercept before the AI can default to (or quote) an out-of-stock flagship bean.
  */
 function isPriceInquiryWithoutBeanContext(userText, senderId) {
-  const PRICE_PATTERN = /^\s*(?:how\s*much|magkano|presyo|price|how\s+much\s+(?:is\s+)?(?:it|that|this)|pila|tag\s*pila)[?!.\s]*$/i;
+  const PRICE_PATTERN =
+    /^\s*(?:how\s*much|magkano|presyo|tag[-\s]?pila|pila|price|how\s+much\s+(?:is\s+)?(?:it|that|this))[?!.\s]*$/i;
   if (!PRICE_PATTERN.test(userText)) return false;
-  // Check if any catalog bean was mentioned in this message or the last 4 user messages
+
   const tenant = getActiveTenant();
+  const { labels: outLabels } = parseUnavailableProductLabels();
+  const outSet = new Set(outLabels);
+
+  // Check if any catalog bean was mentioned in this message or the last 4 user messages
   const allText = [userText, ...recentUserMessages(senderId, 4)].join(" ");
   const matched = matchCatalogFromText(allText, tenant);
-  return !matched; // true = price question with no bean context
+
+  // No bean in context → intercept
+  if (!matched) return true;
+
+  // Bean in context but it's OUT OF STOCK → also intercept so we don't quote an unavailable bean
+  if (outSet.has(matched.label)) return true;
+
+  return false;
 }
 
 function lastAssistantMessage(senderId) {
