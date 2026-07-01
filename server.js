@@ -5288,6 +5288,33 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       } catch (policyErr) {
         console.warn("Out-of-stock policy check:", policyErr.message);
       }
+      // Guard: if the AI suggested cupping sessions for a non-café/non-wholesale customer,
+      // replace with the in-stock bean list. This catches RAG pulling cupping content
+      // when the customer just asked "what beans do you have?" in any language.
+      try {
+        const isCuppingMisfire =
+          resolveProfile(tenant) === "beantol" &&
+          /cupping\s+session/i.test(reply) &&
+          !/\b(?:caf[eé]|wholesale|bulk|6\s*kg|business|shop\s+owner)\b/i.test(userText);
+        if (isCuppingMisfire) {
+          const { labels: _cuppingOos } = parseUnavailableProductLabels();
+          const _cuppingOutSet = new Set(_cuppingOos);
+          const _cuppingInStock = getCatalogProducts(tenant)
+            .filter((p) => !_cuppingOutSet.has(p.label))
+            .map((p) => p.label);
+          if (_cuppingInStock.length) {
+            const lines = ["Here are the espresso beans we have in stock right now:", ""];
+            for (const label of _cuppingInStock) {
+              lines.push(`• ${label} — available now`);
+            }
+            lines.push("", "Which one would you like to know more about? I can share sizes and prices when you pick.");
+            reply = lines.join("\n");
+            console.log("[Cupping guard] Replaced cupping-session misfire with in-stock list.");
+          }
+        }
+      } catch (cuppingGuardErr) {
+        console.warn("Cupping guard:", cuppingGuardErr.message);
+      }
       // Secondary OOS guard: if the AI reply still quotes a price (₱ or size) within
       // 120 chars of an out-of-stock bean name, replace with a clarifying response.
       // This catches cases where the existing policy misses (e.g. no bean in user text).
