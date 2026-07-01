@@ -1592,32 +1592,6 @@ function recentUserMessages(senderId, limit = 5) {
     .slice(-limit);
 }
 
-/**
- * Returns true when the message is a bare price question ("how much?", "magkano?", "tagpila?", etc.)
- * AND either no specific bean is in context OR the bean in context is currently out of stock.
- * Used to intercept before the AI can default to (or quote) an out-of-stock flagship bean.
- */
-function isPriceInquiryWithoutBeanContext(userText, senderId) {
-  const PRICE_PATTERN =
-    /^\s*(?:how\s*much|magkano|presyo|tag[-\s]?pila|pila|price|how\s+much\s+(?:is\s+)?(?:it|that|this))[?!.\s]*$/i;
-  if (!PRICE_PATTERN.test(userText)) return false;
-
-  const tenant = getActiveTenant();
-  const { labels: outLabels } = parseUnavailableProductLabels();
-  const outSet = new Set(outLabels);
-
-  // Check if any catalog bean was mentioned in this message or the last 4 user messages
-  const allText = [userText, ...recentUserMessages(senderId, 4)].join(" ");
-  const matched = matchCatalogFromText(allText, tenant);
-
-  // No bean in context → intercept
-  if (!matched) return true;
-
-  // Bean in context but it's OUT OF STOCK → also intercept so we don't quote an unavailable bean
-  if (outSet.has(matched.label)) return true;
-
-  return false;
-}
 
 function lastAssistantMessage(senderId) {
   const history = getChatHistory(senderId);
@@ -4685,23 +4659,6 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     return;
   }
 
-  // Intercept price-without-context: "How much?" / "Magkano?" with no specific bean named
-  // in the current message or recent history. Return a clarifying question instead of
-  // letting the AI default to Beantol Prime (which may be out of stock).
-  if (isRecommendationsEnabled(tenant) && isPriceInquiryWithoutBeanContext(userText, senderId)) {
-    const { labels: outLabels } = parseUnavailableProductLabels();
-    const outSet = new Set(outLabels);
-    const inStock = getCatalogProducts(tenant)
-      .filter((p) => !outSet.has(p.label) && p.retail)
-      .map((p) => p.label);
-    const beanList = inStock.length
-      ? `We currently have: ${inStock.join(", ")}.`
-      : "Let me check what we have available for you.";
-    const clarifyReply =
-      `Which bean are you asking about? ${beanList}\n\nJust name the one you're interested in and I'll share the sizes and prices.`;
-    await deliverCustomerReply(senderId, userText, platform, clarifyReply, welcomeState);
-    return;
-  }
 
   if (
     isAgentOfferAcceptanceTurn(userText, lastAssistantReply, replyToContext) &&
@@ -5142,7 +5099,10 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         getActiveTenant()
       );
       const closuresNote = await buildClosuresSystemNote().catch(() => "");
+      // INVENTORY is injected FIRST so it has highest priority over all other instructions.
+      const inventoryFirstNote = shouldInjectInventoryForChat(tenant) ? getInventorySystemNote() : "";
       const systemMessages = [
+        ...(inventoryFirstNote ? [{ role: "system", content: inventoryFirstNote }] : []),
         { role: "system", content: getSystemRulesForTenant(tenant) },
         { role: "system", content: getSupportHoursSystemNote() },
         { role: "system", content: getShopStatusSystemNote(tenant) },
@@ -5305,6 +5265,40 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         reply = enforceOutOfStockProductPolicy(userText, reply);
       } catch (policyErr) {
         console.warn("Out-of-stock policy check:", policyErr.message);
+      }
+      // Secondary OOS guard: if the AI reply still quotes a price (₱ or size) within
+      // 120 chars of an out-of-stock bean name, replace with a clarifying response.
+      // This catches cases where the existing policy misses (e.g. no bean in user text).
+      try {
+        if (shouldInjectInventoryForChat(tenant)) {
+          const { labels: _oosLabels } = parseUnavailableProductLabels();
+          if (_oosLabels.length) {
+            const replyLower = reply.toLowerCase();
+            const violatingLabel = _oosLabels.find((label) => {
+              const idx = replyLower.indexOf(label.toLowerCase());
+              if (idx === -1) return false;
+              const window = reply.slice(Math.max(0, idx - 20), idx + label.length + 120);
+              return /₱|\b(?:250g|500g|1kg|wholesale)\b/i.test(window) &&
+                !/\b(?:out of stock|unavailable|not available|currently out)\b/i.test(window);
+            });
+            if (violatingLabel) {
+              const { labels: _oos2 } = parseUnavailableProductLabels();
+              const _outSet2 = new Set(_oos2);
+              const _inStock = getCatalogProducts(tenant)
+                .filter((p) => !_outSet2.has(p.label) && p.retail)
+                .map((p) => p.label);
+              const _list = _inStock.length ? _inStock.join(", ") : null;
+              reply =
+                `${violatingLabel} is currently out of stock — sorry about that!\n\n` +
+                (_list
+                  ? `Here's what we have available: ${_list}.\n\nWhich one would you like to know more about? I can share sizes and prices when you pick.`
+                  : "Let me know what else I can help you with.");
+              console.log(`[OOS guard] Replaced reply quoting out-of-stock ${violatingLabel}`);
+            }
+          }
+        }
+      } catch (oosGuardErr) {
+        console.warn("OOS secondary guard:", oosGuardErr.message);
       }
     } catch (err) {
       console.error(
