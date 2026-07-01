@@ -5161,12 +5161,12 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           systemMessages.push({
             role: "system",
             content:
-              `AVAILABILITY REMINDER (applies to any language — English, Tagalog, Cebuano, or mixed): ` +
-              `If the customer is asking what beans you carry, what is available, what is in stock, or any similar general catalog question — ` +
-              `list ONLY these IN STOCK beans: ${_availInStock.join(", ")}. ` +
-              `Do NOT mention ${_availOos.join(", ")} — they are OUT OF STOCK. ` +
-              `Do NOT deflect to cupping sessions, Zeke's contact, or shop visit suggestions for a simple "what do you have?" question. ` +
-              `Answer the availability question directly and concisely first.`,
+              `AVAILABILITY REMINDER (applies to any language — English, Tagalog, Cebuano, or mixed):\n` +
+              `• "What do you have / Unsay Naa / Ano ang meron / What's available?" → list ALL IN STOCK beans: ${_availInStock.join(", ")}.\n` +
+              `• "What's not available / Unsay wala / Ano ang wala / What's out of stock?" → list ALL OUT OF STOCK beans: ${_availOos.join(", ")}. List every single one — do NOT omit any.\n` +
+              `• For any general availability question, answer directly and concisely. Do NOT deflect to cupping sessions, Zeke's contact, or shop visits.\n` +
+              `COMPLETE OUT OF STOCK list (authoritative): ${_availOos.join(", ")}.\n` +
+              `COMPLETE IN STOCK list (authoritative): ${_availInStock.join(", ")}.`,
           });
         }
       }
