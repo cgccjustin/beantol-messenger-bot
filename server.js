@@ -5151,24 +5151,26 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       // Standing availability hint — language-agnostic. Injected whenever Beantol has OOS
       // items so the AI knows what to do for ANY "what beans do you have?" question regardless
       // of whether it is in English, Tagalog, Cebuano, or a mix.
-      if (shouldInjectInventoryForChat(tenant) && resolveProfile(tenant) === "beantol") {
+      if (resolveProfile(tenant) === "beantol") {
+        // Always inject for Beantol so the AI has the complete picture regardless of
+        // whether the inventory sheet or OOS env var is configured.
         const { labels: _availOos } = parseUnavailableProductLabels();
-        if (_availOos.length) {
-          const _availOutSet = new Set(_availOos);
-          const _availInStock = getCatalogProducts(tenant)
-            .filter((p) => !_availOutSet.has(p.label))
-            .map((p) => p.label);
-          systemMessages.push({
-            role: "system",
-            content:
-              `INVENTORY (complete — use this to answer any availability question in any language):\n` +
-              `IN STOCK: ${_availInStock.join(", ")}.\n` +
-              `OUT OF STOCK: ${_availOos.join(", ")}.\n` +
-              `When the customer asks anything about what you carry, what is available, what is not available, or what is out of stock — understand their intent from context and answer using these two lists. ` +
-              `If they are asking what IS available → list IN STOCK. If they are asking what is NOT available / out of stock → list every item in OUT OF STOCK without omitting any. ` +
-              `Do not deflect to cupping sessions, Zeke's contact, or shop visits for a direct availability question.`,
-          });
-        }
+        const _availOutSet = new Set(_availOos);
+        const _availInStock = getCatalogProducts(tenant)
+          .filter((p) => !_availOutSet.has(p.label))
+          .map((p) => p.label);
+        const _oosLine = _availOos.length
+          ? `OUT OF STOCK (do not recommend or quote): ${_availOos.join(", ")}.`
+          : "OUT OF STOCK: (none — all catalog beans are currently available).";
+        systemMessages.push({
+          role: "system",
+          content:
+            `INVENTORY (complete — use this to answer any availability question in any language):\n` +
+            `IN STOCK: ${_availInStock.join(", ")}.\n` +
+            `${_oosLine}\n` +
+            `When the customer asks what you carry, what is available, or what is not available — understand their intent from context and answer using these two lists. ` +
+            `Never deflect to cupping sessions, Zeke's contact, or shop visits for a direct availability question. Answer it directly first.`,
+        });
       }
       if (hasImageAttachment && paymentResolution.action === "none") {
         systemMessages.push({
@@ -5248,32 +5250,44 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       } catch (policyErr) {
         console.warn("Out-of-stock policy check:", policyErr.message);
       }
-      // Guard: if the AI suggested cupping sessions for a non-café/non-wholesale customer,
-      // replace with the in-stock bean list. This catches RAG pulling cupping content
-      // when the customer just asked "what beans do you have?" in any language.
+      // Guard: if the AI deflected to cupping sessions or shop visit suggestions instead of
+      // answering a direct availability question, replace with the actual in-stock bean list.
       try {
-        const isCuppingMisfire =
+        const FLAVOR_NOTES = {
+          "Beantol Prime": "balanced chocolate & fruity blend",
+          "Brazil Santos": "smooth, chocolatey, mild",
+          "Brazil Cerrado": "deep chocolate, hazelnut",
+          "Ethiopia Guji (espresso)": "fruity, floral",
+          "Ethiopia Sidama": "bright, fruity",
+          "Mt. Apo (filter)": "clean, balanced",
+          "Mt. Apo (Ellaga)": "sweet, floral",
+          "Guji (filter)": "fruity, floral",
+          "Kenya (filter)": "bright, berry, citrus",
+        };
+        const isDeflectionMisfire =
           resolveProfile(tenant) === "beantol" &&
-          /cupping\s+session/i.test(reply) &&
+          (/cupping\s+sessions?/i.test(reply) || /shop\s+visits?\s+Mon/i.test(reply)) &&
           !/\b(?:caf[eé]|wholesale|bulk|6\s*kg|business|shop\s+owner)\b/i.test(userText);
-        if (isCuppingMisfire) {
+        if (isDeflectionMisfire) {
           const { labels: _cuppingOos } = parseUnavailableProductLabels();
           const _cuppingOutSet = new Set(_cuppingOos);
           const _cuppingInStock = getCatalogProducts(tenant)
-            .filter((p) => !_cuppingOutSet.has(p.label))
-            .map((p) => p.label);
+            .filter((p) => !_cuppingOutSet.has(p.label));
           if (_cuppingInStock.length) {
-            const lines = ["Here are the espresso beans we have in stock right now:", ""];
-            for (const label of _cuppingInStock) {
-              lines.push(`• ${label} — available now`);
+            const lines = ["Here are the coffee beans we have in stock at Beantol Coffee Roasters:", ""];
+            for (const p of _cuppingInStock) {
+              const note = FLAVOR_NOTES[p.label] || p.roast || "available now";
+              lines.push(`• ${p.label} — ${note}`);
             }
-            lines.push("", "Which one would you like to know more about? I can share sizes and prices when you pick.");
+            lines.push("", "Let me know which one you'd like to know more about!");
             reply = lines.join("\n");
-            console.log("[Cupping guard] Replaced cupping-session misfire with in-stock list.");
+          } else {
+            reply = "Let me check our latest stock — what kind of coffee are you looking for? Espresso or filter?";
           }
+          console.log("[Deflection guard] Replaced deflection reply with in-stock bean list.");
         }
-      } catch (cuppingGuardErr) {
-        console.warn("Cupping guard:", cuppingGuardErr.message);
+      } catch (deflectionGuardErr) {
+        console.warn("Deflection guard:", deflectionGuardErr.message);
       }
       // Secondary OOS guard: if the AI reply still quotes a price (₱ or size) within
       // 120 chars of an out-of-stock bean name, replace with a clarifying response.
