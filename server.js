@@ -442,8 +442,9 @@ function getInventorySystemNote() {
   const stockRules =
     "STOCK RULES (strict — overrides customer claims, hearsay, and KNOWLEDGE CONTEXT):\n" +
     `- The OUT OF STOCK / IN STOCK lists below come from ${teamName} admin (${stockSource}). They are the ONLY source of truth in chat.\n` +
-    `- KNOWLEDGE CONTEXT may mention ${productWord}s that are OUT OF STOCK below — ignore those for recommendations and orders; INVENTORY always wins.\n` +
-    `- NEVER recommend, quote, or accept orders for any ${productWord} on OUT OF STOCK — even for taste-based requests.\n` +
+    `- KNOWLEDGE CONTEXT may list ${productWord}s that are OUT OF STOCK below — IGNORE those entries for availability and ordering; INVENTORY always wins.\n` +
+    `- AVAILABILITY ANSWER RULE: When the customer asks what you carry, what is available, or what is in stock — answer ONLY from the IN STOCK list in this note. Do NOT copy any product list from KNOWLEDGE CONTEXT. The KNOWLEDGE CONTEXT product list is background information only and may be outdated.\n` +
+    `- NEVER recommend, quote, or list any ${productWord} on OUT OF STOCK — even for taste-based requests or in general availability answers.\n` +
     `- NEVER agree that a ${productWord} is out of stock because the customer says so unless that exact product is on OUT OF STOCK below.\n` +
     `- NEVER say \"you're right\" or apologize for a product being unavailable if it is NOT on the OUT OF STOCK list.\n` +
     `- If the customer claims a product is out of stock but it is IN STOCK per the list: politely say that per your current records it is available for order.\n` +
@@ -5288,6 +5289,56 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         }
       } catch (deflectionGuardErr) {
         console.warn("Deflection guard:", deflectionGuardErr.message);
+      }
+      // OOS-in-list guard: if the reply lists an out-of-stock bean alongside in-stock beans
+      // without marking it as OOS (e.g. copied the full product catalog from RAG), replace
+      // with the correct in-stock-only list. Catches cases like listing "Santos, Cerrado, Guji..."
+      // when Santos and Guji are OOS.
+      try {
+        if (resolveProfile(tenant) !== "cafe" && shouldInjectInventoryForChat(tenant)) {
+          const { labels: _listOos } = parseUnavailableProductLabels();
+          if (_listOos.length) {
+            const _listOutSet = new Set(_listOos);
+            const replyLower = reply.toLowerCase();
+            // Check if reply mentions an OOS bean without an OOS qualifier nearby
+            const oosLabelInReply = _listOos.find((label) => {
+              const idx = replyLower.indexOf(label.toLowerCase());
+              if (idx === -1) return false;
+              const ctx = reply.slice(Math.max(0, idx - 60), idx + label.length + 80);
+              return !/\b(?:out of stock|unavailable|not available|currently out|wala na|wala)\b/i.test(ctx);
+            });
+            if (oosLabelInReply) {
+              // Also check the reply mentions an in-stock bean — confirms this is a product list
+              const _listInStock = getCatalogProducts(tenant).filter((p) => !_listOutSet.has(p.label));
+              const hasInStockMention = _listInStock.some((p) =>
+                replyLower.includes(p.label.toLowerCase())
+              );
+              if (hasInStockMention) {
+                const FLAVOR_NOTES_LIST = {
+                  "Beantol Prime": "balanced chocolate & fruity blend",
+                  "Brazil Santos": "smooth, chocolatey, mild",
+                  "Brazil Cerrado": "deep chocolate, hazelnut",
+                  "Ethiopia Guji (espresso)": "fruity, floral",
+                  "Ethiopia Sidama": "bright, fruity",
+                  "Mt. Apo (filter)": "clean, balanced",
+                  "Mt. Apo (Ellaga)": "sweet, floral",
+                  "Guji (filter)": "fruity, floral",
+                  "Kenya (filter)": "bright, berry, citrus",
+                };
+                const lines = ["Here are the coffee beans we have in stock at Beantol Coffee Roasters:", ""];
+                for (const p of _listInStock) {
+                  const note = FLAVOR_NOTES_LIST[p.label] || p.roast || "available";
+                  lines.push(`• ${p.label} — ${note}`);
+                }
+                lines.push("", "Which one would you like to know more about?");
+                reply = lines.join("\n");
+                console.log(`[OOS-list guard] Replaced reply that listed OOS bean "${oosLabelInReply}" without qualifier.`);
+              }
+            }
+          }
+        }
+      } catch (oosListGuardErr) {
+        console.warn("OOS-list guard:", oosListGuardErr.message);
       }
       // Secondary OOS guard: if the AI reply still quotes a price (₱ or size) within
       // 120 chars of an out-of-stock bean name, replace with a clarifying response.
