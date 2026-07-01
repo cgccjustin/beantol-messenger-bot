@@ -5059,14 +5059,24 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         userText,
         getActiveTenant()
       );
-      // Strip circular "just ask the bot" sentences from knowledge context before the AI sees them.
-      // These come from Q&A entries in the knowledge base that redirect to the bot, but the
-      // customer IS already talking to the bot — copying this verbatim causes a useless reply.
-      if (knowledgeContext) {
+      // Post-RAG knowledge context cleanup for non-café tenants with live inventory:
+      // 1. Strip circular "just ask the bot" sentences — the customer IS already talking to the bot.
+      // 2. Strip bean-origin sentences (imported from / quality-grade Arabica / roasted in Cebu)
+      //    when live inventory data is available — these sentences get retrieved for "what beans
+      //    are available?" questions but are about SOURCES, not stock. The INVENTORY OVERRIDE
+      //    below is the authoritative answer for availability; origin info is not needed for that.
+      if (knowledgeContext && resolveProfile(tenant) !== "cafe") {
+        const { labels: _ragOosFilter } = parseUnavailableProductLabels();
+        // Always strip circular "ask the bot" sentences
         knowledgeContext = knowledgeContext
-          .replace(/[^\n.]*?(?:for the (?:current|latest) (?:list|availability)[^.]*?)?just ask the bot[^.\n]*/gi, "")
-          .replace(/\n{3,}/g, "\n\n")
-          .trim();
+          .replace(/[^\n.]*just ask the bot[^.\n]*/gi, "");
+        // When inventory data exists, also strip origin sentences so the AI uses INVENTORY OVERRIDE
+        if (_ragOosFilter.length) {
+          knowledgeContext = knowledgeContext
+            .replace(/[^\n.]*\b(?:imported from direct suppliers?|quality-grade Arabica|roasted.*(?:small batches?|Cebu roastery)|sources.*Arabica from)\b[^.\n]*\./gi, "")
+            .replace(/[^\n.]*\bArabica selected with care\b[^.\n]*\./gi, "");
+        }
+        knowledgeContext = knowledgeContext.replace(/\n{3,}/g, "\n\n").trim();
       }
       const closuresNote = await buildClosuresSystemNote().catch(() => "");
       // INVENTORY is injected FIRST so it has highest priority over all other instructions.
@@ -5222,9 +5232,11 @@ async function handleMessage(senderId, userText, platform = "messenger", message
             `IN STOCK right now: ${_postRagInStock.join(", ")}.\n` +
             `${_postRagOosLine}\n` +
             `Rules:\n` +
-            `1. If asked what beans you carry or what is available — list ONLY the IN STOCK beans above. Do NOT copy any product list from KNOWLEDGE CONTEXT.\n` +
-            `2. NEVER quote prices, sizes, or availability for any OUT OF STOCK bean — even if the customer names it directly. Acknowledge it is out of stock and suggest an IN STOCK alternative.\n` +
-            `3. Do not tell the customer to "ask the bot" — you ARE the bot. Answer directly.`,
+            `1. If asked what beans you carry, what is available, what is there, "unsay naa", "ano ang meron", "may available ba" — list ONLY the IN STOCK beans above. Do NOT copy any product list from KNOWLEDGE CONTEXT.\n` +
+            `2. If asked what beans are NOT available, what you don't have, what is out of stock, "unsay wala", "ano ang wala", "wala ba" — list ONLY the OUT OF STOCK beans above. Do NOT mix in-stock beans into this answer.\n` +
+            `3. NEVER quote prices, sizes, or availability for any OUT OF STOCK bean — even if the customer names it directly. Acknowledge it is out of stock and suggest an IN STOCK alternative.\n` +
+            `4. Do not tell the customer to "ask the bot" — you ARE the bot. Answer directly.\n` +
+            `5. Do NOT answer availability questions with bean origin/sourcing information. Availability = in-stock or out-of-stock status only.`,
         });
       }
       const sizeNote = buildPendingSizeConfirmationNote(senderId, userText);
