@@ -5265,9 +5265,9 @@ async function handleMessage(senderId, userText, platform = "messenger", message
           "Kenya (filter)": "bright, berry, citrus",
         };
         const isDeflectionMisfire =
-          resolveProfile(tenant) === "beantol" &&
           (/cupping\s+sessions?/i.test(reply) || /shop\s+visits?\s+Mon/i.test(reply)) &&
-          !/\b(?:caf[eé]|wholesale|bulk|6\s*kg|business|shop\s+owner)\b/i.test(userText);
+          !/\b(?:caf[eé]|wholesale|bulk|6\s*kg|business|shop\s+owner|barista\s+training)\b/i.test(userText) &&
+          resolveProfile(tenant) !== "cafe"; // café tenants legitimately discuss cupping for B2B
         if (isDeflectionMisfire) {
           const { labels: _cuppingOos } = parseUnavailableProductLabels();
           const _cuppingOutSet = new Set(_cuppingOos);
