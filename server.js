@@ -5194,6 +5194,28 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       if (knowledgeContext) {
         systemMessages.push({ role: "system", content: knowledgeContext });
       }
+      // ── INVENTORY OVERRIDE (injected AFTER RAG so it takes recency precedence) ──
+      // The KNOWLEDGE CONTEXT above may list beans that are out of stock or use a full
+      // product catalog. This final note overrides it for any availability question.
+      if (resolveProfile(tenant) !== "cafe") {
+        const { labels: _postRagOos } = parseUnavailableProductLabels();
+        const _postRagOutSet = new Set(_postRagOos);
+        const _postRagInStock = getCatalogProducts(tenant)
+          .filter((p) => !_postRagOutSet.has(p.label))
+          .map((p) => p.label);
+        const _postRagOosLine = _postRagOos.length
+          ? `OUT OF STOCK (do NOT list, recommend, or quote): ${_postRagOos.join(", ")}.`
+          : "OUT OF STOCK: none.";
+        systemMessages.push({
+          role: "system",
+          content:
+            `FINAL INVENTORY OVERRIDE (overrides any product list in KNOWLEDGE CONTEXT above):\n` +
+            `IN STOCK right now: ${_postRagInStock.join(", ")}.\n` +
+            `${_postRagOosLine}\n` +
+            `If the customer asked what beans you carry or what is available — use ONLY the IN STOCK list above. ` +
+            `Do NOT copy any product list, origin list, or catalog from the KNOWLEDGE CONTEXT.`,
+        });
+      }
       const sizeNote = buildPendingSizeConfirmationNote(senderId, userText);
       if (sizeNote) {
         systemMessages.push({ role: "system", content: sizeNote });
