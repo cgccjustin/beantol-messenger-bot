@@ -5054,11 +5054,20 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   } else {
     try {
       const history = sanitizeMessagesForOpenAi(getChatHistory(senderId));
-      const knowledgeContext = await rag.retrieveKnowledgeContext(
+      let knowledgeContext = await rag.retrieveKnowledgeContext(
         openai,
         userText,
         getActiveTenant()
       );
+      // Strip circular "just ask the bot" sentences from knowledge context before the AI sees them.
+      // These come from Q&A entries in the knowledge base that redirect to the bot, but the
+      // customer IS already talking to the bot — copying this verbatim causes a useless reply.
+      if (knowledgeContext) {
+        knowledgeContext = knowledgeContext
+          .replace(/[^\n.]*?(?:for the (?:current|latest) (?:list|availability)[^.]*?)?just ask the bot[^.\n]*/gi, "")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+      }
       const closuresNote = await buildClosuresSystemNote().catch(() => "");
       // INVENTORY is injected FIRST so it has highest priority over all other instructions.
       const inventoryFirstNote = shouldInjectInventoryForChat(tenant) ? getInventorySystemNote() : "";
