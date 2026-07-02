@@ -5021,16 +5021,28 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (isKnowledgeFaqInquiry(userText)) {
-    // Availability questions MUST bypass the local FAQ system.
-    // The FAQ system only has static Q&A pairs — it has no access to live inventory data
-    // and cannot tell the customer what is currently in stock or out of stock.
-    // Any FAQ containing the word "beans" will false-match an availability query via the
-    // single shared token, returning an unrelated answer (origin info, cupping, sizing…).
-    // Routing these to the AI with INVENTORY OVERRIDE gives the correct, live answer.
-    const isInventoryQuery =
-      shouldInjectInventoryForChat(tenant) &&
-      /\b(?:naa|wala|available|in\s*stock|out\s*of\s*stock|stock|meron|mayroon|unsay\s+naa|unsay\s+wala)\b/i.test(userText);
-    if (!isInventoryQuery) {
+    // Certain query types MUST bypass the local FAQ system because the FAQ system only
+    // has static text and cannot give accurate answers for live/dynamic data:
+    //
+    // 1. INVENTORY / AVAILABILITY — FAQ has no live stock data. The AI gets an
+    //    INVENTORY OVERRIDE with current in-stock / out-of-stock lists.
+    //    Applies to all tenants (not just those with inventory configured) because
+    //    even café tenants should get live menu/stock answers via the AI.
+    //
+    // 2. HOURS / CLOSURES — FAQ has static business hours. The AI gets
+    //    buildClosuresSystemNote() and getShopStatusSystemNote() with live closure
+    //    data (holidays, special closures) that the FAQ cannot know about.
+    //
+    // 3. DELIVERY / ORDER STATUS — handled by dedicated delivery/order flows.
+    //    FAQ cannot look up order state.
+    const _faqBypassInventory =
+      /\b(?:naa|wala|available|in\s*stock|out\s*of\s*stock|stock|meron|mayroon|unsay\s+naa|unsay\s+wala|what.*(?:have|carry|offer)|what.*(?:beans?|products?|items?).*(?:there|available|naa|meron))\b/i.test(userText);
+    const _faqBypassHours =
+      /\b(?:open|close[ds]?|hours?|schedule|bukas|sara[do]?|anong\s+oras|what\s+time|business\s+hours?|operating|closure)\b/i.test(userText);
+    const _faqBypassDelivery =
+      /\b(?:order\s+status|track(?:ing)?|my\s+order|delivery\s+status|where.*(?:order|package))\b/i.test(userText);
+    const _shouldBypassFaq = _faqBypassInventory || _faqBypassHours || _faqBypassDelivery;
+    if (!_shouldBypassFaq) {
       const reply = buildKnowledgeFaqReply(tenant, userText);
       if (reply) {
         captureLeadFromMessage(senderId, userText, platform, {
