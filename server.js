@@ -5036,7 +5036,7 @@ async function handleMessage(senderId, userText, platform = "messenger", message
     // 3. DELIVERY / ORDER STATUS — handled by dedicated delivery/order flows.
     //    FAQ cannot look up order state.
     const _faqBypassInventory =
-      /\b(?:naa|wala|available|in\s*stock|out\s*of\s*stock|stock|meron|mayroon|unsay\s+naa|unsay\s+wala|what.*(?:have|carry|offer)|what.*(?:beans?|products?|items?).*(?:there|available|naa|meron))\b/i.test(userText);
+      /\b(?:naa|wala|dili|available|in\s*stock|out\s*of\s*stock|stock|meron|mayroon|unsay\s+naa|unsay\s+wala|unsay\s+dili|what.*(?:have|carry|offer)|what.*(?:beans?|products?|items?).*(?:there|available|naa|meron))\b/i.test(userText);
     const _faqBypassHours =
       /\b(?:open|close[ds]?|hours?|schedule|bukas|sara[do]?|anong\s+oras|what\s+time|business\s+hours?|operating|closure)\b/i.test(userText);
     const _faqBypassDelivery =
