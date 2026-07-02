@@ -5066,16 +5066,18 @@ async function handleMessage(senderId, userText, platform = "messenger", message
       //    are available?" questions but are about SOURCES, not stock. The INVENTORY OVERRIDE
       //    below is the authoritative answer for availability; origin info is not needed for that.
       if (knowledgeContext && resolveProfile(tenant) !== "cafe") {
-        const { labels: _ragOosFilter } = parseUnavailableProductLabels();
-        // Always strip circular "ask the bot" sentences
+        // Strip circular "ask the bot" sentences — the customer IS already talking to the bot.
         knowledgeContext = knowledgeContext
           .replace(/[^\n.]*just ask the bot[^.\n]*/gi, "");
-        // When inventory data exists, also strip origin sentences so the AI uses INVENTORY OVERRIDE
-        if (_ragOosFilter.length) {
-          knowledgeContext = knowledgeContext
-            .replace(/[^\n.]*\b(?:imported from direct suppliers?|quality-grade Arabica|roasted.*(?:small batches?|Cebu roastery)|sources.*Arabica from)\b[^.\n]*\./gi, "")
-            .replace(/[^\n.]*\bArabica selected with care\b[^.\n]*\./gi, "");
-        }
+        // Always strip bean-origin/sourcing sentences from RAG context for non-café tenants.
+        // These sentences describe WHERE beans come from (Brazil, Ethiopia...) and how they are
+        // processed. When retrieved for "what beans do you have?" / "Unsay Naa nga beans?", the AI
+        // copies them verbatim as if they were an availability answer.
+        // Stripping is unconditional — does NOT depend on OOS products being configured —
+        // because origin sentences are never the right answer to an availability question.
+        // Regex: match from start of sentence to end of line (period optional — RAG chunks vary).
+        knowledgeContext = knowledgeContext
+          .replace(/[^\n.]*\b(?:imported from direct suppliers?|quality-grade Arabica|roasted.*(?:small batches?|Cebu roastery)|sources.*Arabica from|Arabica selected with care)\b[^\n]*?\.?(?=\n|$)/gi, "");
         knowledgeContext = knowledgeContext.replace(/\n{3,}/g, "\n\n").trim();
       }
       const closuresNote = await buildClosuresSystemNote().catch(() => "");

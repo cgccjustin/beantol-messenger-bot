@@ -129,7 +129,7 @@ There is no single “default” bean — preference matters:
 
 Bean Sourcing & Origins
 
-We import beans from direct suppliers, focused on quality-grade Arabica selected with care.
+Beantol works with specialty-grade Arabica sourced with care from trusted suppliers across four origins.
 
 Brazil — Brazil Santos, Brazil Cerrado; also part of Beantol Prime
 Ethiopia — Ethiopia Guji, Ethiopia Sidama; also part of Beantol Prime. Filter “Guji” is Ethiopian
@@ -313,7 +313,7 @@ Q: What is Beantol Prime? / Tell me about Prime?
 A: Flagship espresso blend — Brazil & Ethiopia, “best of both worlds” balance of chocolatey and fruity notes. Flavor: sweet chocolate, nutty, pistachio. Prices: 250g ₱420, 500g ₱780, 1kg ₱1,450.
 
 Q: Where do your beans come from? / Origin? / Asa gikan ang imong mga beans? (SOURCE COUNTRY — not an availability question)
-A: Beantol sources quality-grade Arabica from Brazil, Ethiopia, Kenya, and the Philippines (Mt. Apo region). All beans are imported from direct suppliers and roasted fresh in small batches at our Cebu roastery.
+A: Beantol works with specialty-grade Arabica sourced from Brazil, Ethiopia, Kenya, and the Philippines (Mt. Apo region) — fresh-roasted in small batches at our Cebu roastery. (For which beans are currently available, ask about our stock.)
 
 Q: Do you have local / Philippine beans?
 A: Yes — Mt. Apo and Mt. Apo (Ellaga). Local coffee is roasted on demand; custom local sourcing needs lead time.
