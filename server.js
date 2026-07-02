@@ -5021,14 +5021,25 @@ async function handleMessage(senderId, userText, platform = "messenger", message
   }
 
   if (isKnowledgeFaqInquiry(userText)) {
-    const reply = buildKnowledgeFaqReply(tenant, userText);
-    if (reply) {
-      captureLeadFromMessage(senderId, userText, platform, {
-        interest: "knowledge FAQ",
-        stage: "browsing",
-      });
-      await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
-      return;
+    // Availability questions MUST bypass the local FAQ system.
+    // The FAQ system only has static Q&A pairs — it has no access to live inventory data
+    // and cannot tell the customer what is currently in stock or out of stock.
+    // Any FAQ containing the word "beans" will false-match an availability query via the
+    // single shared token, returning an unrelated answer (origin info, cupping, sizing…).
+    // Routing these to the AI with INVENTORY OVERRIDE gives the correct, live answer.
+    const isInventoryQuery =
+      shouldInjectInventoryForChat(tenant) &&
+      /\b(?:naa|wala|available|in\s*stock|out\s*of\s*stock|stock|meron|mayroon|unsay\s+naa|unsay\s+wala)\b/i.test(userText);
+    if (!isInventoryQuery) {
+      const reply = buildKnowledgeFaqReply(tenant, userText);
+      if (reply) {
+        captureLeadFromMessage(senderId, userText, platform, {
+          interest: "knowledge FAQ",
+          stage: "browsing",
+        });
+        await deliverCustomerReply(senderId, userText, platform, reply, welcomeState);
+        return;
+      }
     }
   }
 
