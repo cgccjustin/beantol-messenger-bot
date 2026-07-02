@@ -312,7 +312,7 @@ Products & origins
 Q: What is Beantol Prime? / Tell me about Prime?
 A: Flagship espresso blend — Brazil & Ethiopia, “best of both worlds” balance of chocolatey and fruity notes. Flavor: sweet chocolate, nutty, pistachio. Prices: 250g ₱420, 500g ₱780, 1kg ₱1,450.
 
-Q: Where do your beans come from? / Origin? / Asa gikan ang imong mga beans? (SOURCE COUNTRY — not an availability question)
+Q: Where do you source from? / Origin country? / Asa gikan? / Asa gikan ang inyong kape? (SOURCE COUNTRY — not an availability question)
 A: Beantol works with specialty-grade Arabica sourced from Brazil, Ethiopia, Kenya, and the Philippines (Mt. Apo region) — fresh-roasted in small batches at our Cebu roastery. (For which beans are currently available, ask about our stock.)
 
 Q: Do you have local / Philippine beans?
