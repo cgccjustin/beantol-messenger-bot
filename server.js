@@ -5069,15 +5069,26 @@ async function handleMessage(senderId, userText, platform = "messenger", message
         // Strip circular "ask the bot" sentences — the customer IS already talking to the bot.
         knowledgeContext = knowledgeContext
           .replace(/[^\n.]*just ask the bot[^.\n]*/gi, "");
-        // Always strip bean-origin/sourcing sentences from RAG context for non-café tenants.
-        // These sentences describe WHERE beans come from (Brazil, Ethiopia...) and how they are
-        // processed. When retrieved for "what beans do you have?" / "Unsay Naa nga beans?", the AI
-        // copies them verbatim as if they were an availability answer.
-        // Stripping is unconditional — does NOT depend on OOS products being configured —
-        // because origin sentences are never the right answer to an availability question.
-        // Regex: match from start of sentence to end of line (period optional — RAG chunks vary).
+        // Strip bean-origin/sourcing sentences from RAG context.
+        // These describe WHERE beans come from and HOW they are processed — they are not answers
+        // to "what beans do you have?" / "Unsay Naa nga beans?" but RAG keeps matching them.
+        // Period is optional — RAG chunks do not always end with punctuation.
         knowledgeContext = knowledgeContext
-          .replace(/[^\n.]*\b(?:imported from direct suppliers?|quality-grade Arabica|roasted.*(?:small batches?|Cebu roastery)|sources.*Arabica from|Arabica selected with care)\b[^\n]*?\.?(?=\n|$)/gi, "");
+          .replace(/[^\n.]*\b(?:imported from direct suppliers?|quality-grade Arabica|roasted.*(?:small batches?|Cebu roastery)|sources.*Arabica from|Arabica selected with care|specialty-grade Arabica sourced)\b[^\n]*?\.?(?=\n|$)/gi, "");
+        // Strip cupping-session sentences for non-café/wholesale users.
+        // "Cupping sessions are for café owners…" keeps surfacing as the top RAG match for
+        // availability queries because RAG ranks it above the inventory data. Retail customers
+        // asking "what beans are there?" should never receive a cupping-session answer.
+        // The cupping rule in SYSTEM RULES already surfaces cupping in the right context;
+        // removing it from RAG prevents the AI from copying it verbatim for the wrong query.
+        const isCuppingQuery = /\bcupping\b|\bkape\s+session|\btasting\s+session\b/i.test(userText);
+        const isWholesaleQuery = /\bwholesale\b|\bbulk\b|\bcaf[eé]\b|\bbarista\b/i.test(userText);
+        if (!isCuppingQuery && !isWholesaleQuery) {
+          knowledgeContext = knowledgeContext
+            .replace(/[^\n.]*\bCupping sessions?\b[^\n]*?\.?(?=\n|$)/gi, "")
+            .replace(/[^\n.]*\bContact Zeke\b[^\n]*?\.?(?=\n|$)/gi, "")
+            .replace(/[^\n.]*\bNot applicable for retail\b[^\n]*?\.?(?=\n|$)/gi, "");
+        }
         knowledgeContext = knowledgeContext.replace(/\n{3,}/g, "\n\n").trim();
       }
       const closuresNote = await buildClosuresSystemNote().catch(() => "");
