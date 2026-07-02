@@ -354,8 +354,8 @@ A: Current stock is managed in real time — the bot will check the live invento
 
 Services & contacts
 
-Q: Cupping session? / Sample beans? (FOR CAFÉ OWNERS AND WHOLESALE BUYERS ONLY — not for retail customers asking what beans are available)
-A: Cupping sessions are for café owners and wholesale buyers exploring beans for their business. Contact Zeke 09084094733 to arrange. Not applicable for retail single-bag purchases.
+Q: Cupping session? / Taste samples? / Do you do cupping? (FOR CAFÉ OWNERS AND WHOLESALE BUYERS ONLY — not for retail customers asking what is available)
+A: Cupping sessions are for café owners and wholesale buyers exploring our coffee for their business. Contact Zeke 09084094733 to arrange. Not applicable for retail single-bag purchases.
 
 Q: Training? / Barista training?
 A: Contact Zeke 09084094733.
